@@ -242,6 +242,12 @@ void zell__plat_mem_unmap(void *p, size_t len) {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 
+/* Large pages need SeLockMemoryPrivilege and are never transparent. */
+void zell__plat_mem_hint_huge(void *p, size_t len) {
+    (void)p;
+    (void)len;
+}
+
 /* DiscardVirtualMemory (Windows 8.1+) drops the pages' contents and their
  * physical memory but keeps them committed, so the range needs no
  * re-commit before reuse (MEM_DECOMMIT would). Older systems: MEM_RESET. */

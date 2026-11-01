@@ -380,6 +380,10 @@ static hp_page *page_acquire(hp_heap *h, uint32_t c) {
                 if (s) zell__plat_mem_unmap(s, HP_SEG);
                 return NULL;
             }
+            /* From the second segment on, huge pages: a heap that grew past
+             * 4 MB takes far fewer page faults, a small program keeps its
+             * small RSS. */
+            if (g_segments) zell__plat_mem_hint_huge(s, HP_SEG);
             s->next = g_segments;
             g_segments = s;
             g_seg_cur = s;

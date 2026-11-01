@@ -216,11 +216,15 @@ ZELL_PLAT_HIDDEN size_t zell__plat_alloc_size(void *p);
  * / MEM_RESET); callers must not rely on the contents. zell__plat_mem_remap
  * grows or shrinks a mapping, possibly moving it (Linux mremap); NULL means
  * unsupported or failed, and the old mapping is untouched.
+ * zell__plat_mem_hint_huge asks for transparent huge pages on a mapping
+ * (Linux MADV_HUGEPAGE: one fault per 2 MB where THP is "madvise"; a no-op
+ * elsewhere).
  * zell__plat_malloc_trim gives free malloc memory back (glibc malloc_trim). */
 ZELL_PLAT_HIDDEN size_t zell__plat_page_size(void);
 ZELL_PLAT_HIDDEN void *zell__plat_mem_map(size_t len, size_t align);
 ZELL_PLAT_HIDDEN void zell__plat_mem_unmap(void *p, size_t len);
 ZELL_PLAT_HIDDEN void zell__plat_mem_release(void *p, size_t len);
+ZELL_PLAT_HIDDEN void zell__plat_mem_hint_huge(void *p, size_t len);
 ZELL_PLAT_HIDDEN void *zell__plat_mem_remap(void *p, size_t old_len, size_t new_len);
 ZELL_PLAT_HIDDEN void zell__plat_malloc_trim(void);
 

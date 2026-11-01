@@ -155,6 +155,15 @@ void *zell__plat_mem_map(size_t len, size_t align) {
     return a;
 }
 
+void zell__plat_mem_hint_huge(void *p, size_t len) {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    madvise(p, len, MADV_HUGEPAGE);
+#else
+    (void)p;
+    (void)len;
+#endif
+}
+
 void zell__plat_mem_unmap(void *p, size_t len) {
     if (p) munmap(p, len);
 }
