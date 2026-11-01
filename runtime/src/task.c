@@ -876,7 +876,7 @@ int64_t zell__sched_max_threads(void) {
 static int64_t worker_count(void) {
     const char *env = getenv("ZELL_WORKERS");
     long n = env ? strtol(env, NULL, 10) : 0;
-    if (n <= 0) n = zell__plat_cpu_count();
+    if (n <= 0) n = zell__plat_cpu_limit();   /* affinity and a container's CPU quota */
     if (n <= 0) n = 1;
     if (n > 256) n = 256;
     return n;
@@ -916,7 +916,7 @@ void zell__sched_start(void) {
     q_stopping = 0;
     q_nworkers = worker_count();
     q_max_spares = spare_limit(q_nworkers);
-    q_ncpu = zell__plat_cpu_count();
+    q_ncpu = zell__plat_cpu_limit();
     for (int64_t i = 0; i < q_nworkers; i++) spawn_worker_locked(0);
     __atomic_store_n(&q_started, 1, __ATOMIC_RELEASE);
     zell__plat_mutex_unlock(&q_mu);

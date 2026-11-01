@@ -1416,8 +1416,12 @@ built as `*_async` variants that return a `zell_task *`.
 
 ### 10.1 Model
 
-- **Scheduler**: N worker threads (N = online CPUs, or the `ZELL_WORKERS`
-  environment variable). A job is a `(fn, arg)` pair plus the task context
+- **Scheduler**: N worker threads (N = the CPUs the process may use,
+  `zell__plat_cpu_limit`: online CPUs capped by the affinity mask and by a
+  CPU quota rounded up, Linux cgroup v2 `cpu.max` of the group and its
+  ancestors or v1 `cpu.cfs_quota_us`/`cpu.cfs_period_us`, Windows a
+  hard-capped job object's CPU rate; or the `ZELL_WORKERS` environment
+  variable). A job is a `(fn, arg)` pair plus the task context
   and current task it runs with (10.8, 10.11). The queues are Go's:
   - every worker owns a **local run queue**, a ring of 256 jobs that only
     its owner pushes to (posts made from that worker: `zell_sched_post`,
@@ -2399,7 +2403,7 @@ output still sitting in buffers may be lost if workers are still printing.
 
 | Variable | Effect |
 |---|---|
-| `ZELL_WORKERS=n` | number of worker threads (default: online CPUs, max 256) |
+| `ZELL_WORKERS=n` | number of worker threads (default: the CPUs the process may use, affinity and container CPU quota included, 10.1; max 256) |
 | `ZELL_NO_BACKTRACE=1` | panic prints only the `panic: ...` line (useful for golden-output tests) |
 | `ZELL_NO_LINES=1` | panic backtraces print symbol+offset frames instead of `file:line` from the line table (8.2) |
 | `ZELL_CYCLES=auto\|manual\|off` | the cycle collector (3.8): automatic collections (default), only `runtime.CollectCycles()`, or none (plain reference counting). `ZELL_CYCLES_THRESHOLD=N` fixes the number of recorded roots that triggers an automatic collection; `ZELL_CYCLES_MAX_SCAN=N` bounds the objects one collection examines (default 2^22) |

@@ -74,6 +74,84 @@ int64_t zell__plat_cpu_count(void) {
     return n > 0 ? (int64_t)n : 1;
 }
 
+#if defined(__linux__)
+/* Reads up to cap-1 bytes of a small file (cgroup and /proc entries). */
+static ssize_t read_small(const char *path, char *buf, size_t cap) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, cap - 1);
+    close(fd);
+    if (n < 0) return -1;
+    buf[n] = 0;
+    return n;
+}
+
+/* The CPUs a quota of `quota` per `period` microseconds allows, rounded up
+ * (Go 1.25's GOMAXPROCS rule); 0 when there is no quota. */
+static int64_t quota_cpus(long long quota, long long period) {
+    if (quota <= 0 || period <= 0) return 0;
+    return (int64_t)((quota + period - 1) / period);
+}
+
+/* The smallest CPU quota on the way from the process's cgroup to the root:
+ * cgroup v2 cpu.max ("max" or "<quota> <period>") of every ancestor, else
+ * cgroup v1 cpu.cfs_quota_us / cpu.cfs_period_us of the cpu controller's
+ * group. 0: no quota. */
+static int64_t cgroup_cpu_quota(void) {
+    char cg[4096], path[4352], buf[128];
+    if (read_small("/proc/self/cgroup", cg, sizeof cg) <= 0) return 0;
+    int64_t best = 0;
+    /* v2: the line "0::/path" */
+    char *v2 = strstr(cg, "0::");
+    if (v2 && (v2 == cg || v2[-1] == '\n')) {
+        char cur[4096];
+        size_t len = strcspn(v2 + 3, "\n");
+        if (len >= sizeof cur) len = sizeof cur - 1;
+        memcpy(cur, v2 + 3, len);
+        cur[len] = 0;
+        for (;;) {   /* this group, then each parent up to the root */
+            snprintf(path, sizeof path, "/sys/fs/cgroup%s/cpu.max", strcmp(cur, "/") == 0 ? "" : cur);
+            long long q, per;
+            if (read_small(path, buf, sizeof buf) > 0 && sscanf(buf, "%lld %lld", &q, &per) == 2) {
+                int64_t c = quota_cpus(q, per);
+                if (c > 0 && (best == 0 || c < best)) best = c;
+            }
+            char *slash = strrchr(cur, '/');
+            if (!slash || strcmp(cur, "/") == 0) break;
+            if (slash == cur) cur[1] = 0;
+            else *slash = 0;
+        }
+        if (best) return best;
+    }
+    /* v1: the cpu controller, at the usual mount points (inside a container
+     * its group is the mount's root) */
+    static const char *const mounts[] = { "/sys/fs/cgroup/cpu,cpuacct", "/sys/fs/cgroup/cpu" };
+    for (size_t i = 0; i < sizeof mounts / sizeof mounts[0]; i++) {
+        long long q = 0, per = 0;
+        snprintf(path, sizeof path, "%s/cpu.cfs_quota_us", mounts[i]);
+        if (read_small(path, buf, sizeof buf) <= 0 || sscanf(buf, "%lld", &q) != 1) continue;
+        snprintf(path, sizeof path, "%s/cpu.cfs_period_us", mounts[i]);
+        if (read_small(path, buf, sizeof buf) <= 0 || sscanf(buf, "%lld", &per) != 1) continue;
+        return quota_cpus(q, per);
+    }
+    return 0;
+}
+#endif
+
+int64_t zell__plat_cpu_limit(void) {
+    int64_t n = zell__plat_cpu_count();
+#if defined(__linux__)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0) {   /* taskset, cpuset */
+        int a = CPU_COUNT(&set);
+        if (a > 0 && a < n) n = a;
+    }
+    int64_t q = cgroup_cpu_quota();
+    if (q > 0 && q < n) n = q;
+#endif
+    return n > 0 ? n : 1;
+}
+
 void zell__plat_yield(void) { sched_yield(); }
 
 int64_t zell__plat_mono_ns(void) {

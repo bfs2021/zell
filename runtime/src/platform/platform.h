@@ -57,6 +57,11 @@ ZELL_PLAT_HIDDEN bool zell__plat_thread_start_background(zell__plat_thread_fn fn
 ZELL_PLAT_HIDDEN void zell__plat_thread_join(zell__plat_thread t);
 /* Number of online CPUs (at least 1). */
 ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_count(void);
+/* The CPUs this process may use (at least 1, at most the online ones): the
+ * affinity mask (taskset, a cpuset) and a CPU quota rounded up (Linux
+ * cgroup v2 cpu.max on the way to the root, else v1 cfs_quota/period;
+ * Windows: a hard-capped job object's CPU rate). The default worker count. */
+ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_limit(void);
 /* Gives up the CPU (spin-lock back-off). */
 ZELL_PLAT_HIDDEN void zell__plat_yield(void);
 /* A spin-wait hint to the CPU (x86 `pause`, arm64 `yield`): no system

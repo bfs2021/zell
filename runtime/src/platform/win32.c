@@ -144,6 +144,26 @@ int64_t zell__plat_cpu_count(void) {
     return n > 0 ? (int64_t)n : 1;
 }
 
+int64_t zell__plat_cpu_limit(void) {
+    int64_t n = zell__plat_cpu_count();
+    DWORD_PTR proc = 0, sys = 0;   /* the affinity mask (one processor group) */
+    if (GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) && proc) {
+        int64_t a = 0;
+        for (DWORD_PTR m = proc; m; m &= m - 1) a++;
+        if (a < n) n = a;
+    }
+    /* A container (a job object) with a hard CPU cap: CpuRate is in
+     * hundredths of a percent of the whole machine. */
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION rc;
+    if (QueryInformationJobObject(NULL, JobObjectCpuRateControlInformation, &rc, sizeof rc, NULL)
+        && (rc.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) && (rc.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP)
+        && !(rc.ControlFlags & (JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED | JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE))) {
+        int64_t c = ((int64_t)rc.CpuRate * zell__plat_cpu_count() + 9999) / 10000;
+        if (c > 0 && c < n) n = c;
+    }
+    return n > 0 ? n : 1;
+}
+
 void zell__plat_yield(void) { SwitchToThread(); }
 
 /* ---- locks ------------------------------------------------------------------- */
