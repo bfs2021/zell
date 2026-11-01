@@ -19,24 +19,37 @@ func producer(ch chan int, id, n int) {
 	close(ch)
 }
 
-func selectLoop(c []chan int, total int) int {
+func selectLoop(chs []chan int, total int) int {
+	// A closed channel is set to nil (never ready in a select), as main.zl
+	// drops it, instead of being polled again.
+	c := append([]chan int(nil), chs...)
 	sum, got := 0, 0
 	for got < total {
-		var v int
+		var v, i int
 		var ok bool
 		select {
 		case v, ok = <-c[0]:
+			i = 0
 		case v, ok = <-c[1]:
+			i = 1
 		case v, ok = <-c[2]:
+			i = 2
 		case v, ok = <-c[3]:
+			i = 3
 		case v, ok = <-c[4]:
+			i = 4
 		case v, ok = <-c[5]:
+			i = 5
 		case v, ok = <-c[6]:
+			i = 6
 		case v, ok = <-c[7]:
+			i = 7
 		}
 		if ok {
 			sum += v
 			got++
+		} else {
+			c[i] = nil
 		}
 	}
 	return sum

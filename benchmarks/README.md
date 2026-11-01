@@ -531,7 +531,7 @@ that finishes in well under a second, and `DETAIL=1` prints the phase lines.
 | `await_chain` | an async function awaiting itself 1000 deep, 10k times (no suspension), and 1k times with a `task.Yield` at the bottom (the chain suspends and 1000 frames resume); Go: plain recursion and `runtime.Gosched` |
 | `cancel_tree` | 10k tasks blocked (half `Recv`, half a 100 s `Delay`) in a `task.NewCancel` scope, cancelled at once, 10 rounds; the same with `task.WithTimeout(20)`; time from the cancel to the last task done (Go: `context.WithCancel` / `WithTimeout`) |
 | `async_io` | 1000 loopback TCP connections x 1000 round trips of 64 bytes (latency-bound, unlike `tcp_echo`); round trips/s and p50/p99/max latency |
-| `select_many` | one consumer takes 2M events from whichever of 8 unbuffered channels is ready; Zell has no `select`, so it keeps a `Recv` per channel and waits with `task.Any` (which cancels the losers, so every event re-arms the receives); for reference the same events through a merge channel fed by 8 forwarders |
+| `select_many` | one consumer takes 2M events from whichever of 8 unbuffered channels is ready; Zell has no `select`, so it keeps a `Recv` per channel and waits with `task.Any` (which cancels the losers, so every event re-arms the receives); for reference the same events through a merge channel fed by 8 forwarders. Since 2026-11-02 both versions stop polling a closed channel (Zell drops it from the set, Go sets it to nil): before, the tail of the loop was a busy poll, which hung Zell with one worker and inflated both sides; numbers before that date are not comparable |
 
 ### Results (2026-10-22, quiet machine, best of 5)
 

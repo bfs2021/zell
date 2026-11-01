@@ -20,20 +20,29 @@ async func producer(ch task.Channel<int>, id int, n int) {
 async func selectLoop(chs []task.Channel<int>, total int) int {
     var sum = 0
     var got = 0
+    var open = chs
     for got < total {
         var pending []Task<int!> = []
-        for c in chs {
+        for c in open {
             pending = append(pending, c.Recv())
         }
-        // task.Any takes the tasks as separate arguments (no slice form).
-        _ = await task.Any(pending[0], pending[1], pending[2], pending[3], pending[4], pending[5], pending[6], pending[7])
-        for p in pending {
-            var v = try await p catch _ {
+        _ = await task.Any(pending...)
+        // A closed, drained channel leaves the set (the Go version sets it
+        // to nil): receiving from it again would complete at once and turn
+        // the loop into a busy poll. A loser that Any cancelled stays.
+        var still []task.Channel<int> = []
+        for i in 0..len(pending) {
+            var v = try await pending[i] catch _ {
+                if !(open[i].IsClosed() && open[i].Len() == 0) {
+                    still = append(still, open[i])
+                }
                 continue
             }
             sum += v
             got += 1
+            still = append(still, open[i])
         }
+        open = still
     }
     return sum
 }
