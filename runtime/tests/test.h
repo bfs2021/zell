@@ -21,10 +21,13 @@ static inline int setenv(const char *k, const char *v, int overwrite) {
     return _putenv_s(k, v);
 }
 static inline int unsetenv(const char *k) { return _putenv_s(k, ""); }
-static inline char *mkdtemp(char *tmpl) {
+/* mingw-w64 15 declares mkdtemp in <stdlib.h>, older ones do not: a
+ * helper of our own name works with both. */
+static inline char *zell__test_mkdtemp(char *tmpl) {
     if (!_mktemp(tmpl) || _mkdir(tmpl) != 0) return NULL;
     return tmpl;
 }
+#define mkdtemp zell__test_mkdtemp
 static inline int symlink(const char *target, const char *path) {
     return CreateSymbolicLinkA(path, target, 0x2 /* ALLOW_UNPRIVILEGED_CREATE */) ? 0 : -1;
 }
