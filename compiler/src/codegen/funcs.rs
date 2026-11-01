@@ -123,7 +123,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let ret = self.prog.funcs[fid.0 as usize].ret;
         self.with_helper(w, |cg| {
             let args: Vec<BasicMetadataValueEnum> = w.get_params().iter().map(|p| BasicMetadataValueEnum::from(*p)).collect();
-            let r = cg.b.build_call(body, &args, "").unwrap().try_as_basic_value().left().unwrap();
+            let r = cg.b.build_call(body, &args, "").unwrap().try_as_basic_value().basic().unwrap();
             cg.retain_val(ret, r);
             cg.b.build_return(Some(&r)).unwrap();
             Ok(())
@@ -653,7 +653,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 cg.b.build_return(Some(&t)).unwrap();
                 return Ok(());
             }
-            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().basic();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
@@ -726,7 +726,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let lty = self.closure_fn_llty(fty);
         let mut all: Vec<BasicMetadataValueEnum> = vec![env.into()];
         all.extend(args.iter().map(|a| BasicMetadataValueEnum::from(*a)));
-        Ok(self.call_site(lty, inkwell::values::AsValueRef::as_value_ref(&fnp), &all, true).try_as_basic_value().left())
+        Ok(self.call_site(lty, inkwell::values::AsValueRef::as_value_ref(&fnp), &all, true).try_as_basic_value().basic())
     }
 
     /// Panics with `zell_panic_nil` if `p` is NULL.

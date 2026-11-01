@@ -147,7 +147,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let cont = self.block("dbg.cont");
         let expect = inkwell::intrinsics::Intrinsic::find("llvm.expect").and_then(|i| i.get_declaration(&self.module, &[self.ctx.bool_type().into()]));
         let c = match expect {
-            Some(f) => self.b.build_call(f, &[on.into(), self.ctx.bool_type().const_zero().into()], "").unwrap().try_as_basic_value().left().unwrap().into_int_value(),
+            Some(f) => self.b.build_call(f, &[on.into(), self.ctx.bool_type().const_zero().into()], "").unwrap().try_as_basic_value().basic().unwrap().into_int_value(),
             None => on,
         };
         self.b.build_conditional_branch(c, hook, cont).unwrap();
@@ -281,7 +281,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let args: Vec<inkwell::values::BasicMetadataValueEnum> = fv.get_params().iter().map(|p| (*p).into()).collect();
         let call = self.b.build_call(clone, &args, "").unwrap();
         call.set_tail_call(true);
-        match call.try_as_basic_value().left() {
+        match call.try_as_basic_value().basic() {
             Some(r) => self.b.build_return(Some(&r)).unwrap(),
             None => self.b.build_return(None).unwrap(),
         };

@@ -194,7 +194,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
             }
         }
-        let r = cs.try_as_basic_value().left();
+        let r = cs.try_as_basic_value().basic();
         if let Some(BasicValueEnum::IntValue(iv)) = r {
             if iv.get_type().get_bit_width() == 1 {
                 cs.add_attribute(AttributeLoc::Return, zext);

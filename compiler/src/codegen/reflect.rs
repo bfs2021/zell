@@ -483,7 +483,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let target = self.funcs[fid.0 as usize];
         self.with_helper(thunk, |cg| {
             let args: Vec<BasicMetadataValueEnum> = thunk.get_params().iter().skip(1).map(|p| (*p).into()).collect();
-            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().basic();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
@@ -603,7 +603,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 }
                 vals.push(v.into());
             }
-            let r = cg.b.build_call(target, &vals, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &vals, "").unwrap().try_as_basic_value().basic();
             // Box the result.
             let (val_ty, err) = match (cg.ty(ret).clone(), r) {
                 (Type::Fallible(inner), Some(rv)) if matches!(cg.ty(inner), Type::Void) => (None, Some(rv.into_pointer_value())),
@@ -664,7 +664,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     cg.b.build_conditional_branch(isnull, same, has).unwrap();
                     cg.b.position_at_end(has);
                     let f = cg.any_inline_fn();
-                    let inl = cg.b.build_call(f, &[ti.into()], "").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                    let inl = cg.b.build_call(f, &[ti.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_int_value();
                     let boxit = cg.block("box");
                     cg.b.build_conditional_branch(inl, boxit, same).unwrap();
                     cg.b.position_at_end(boxit);
@@ -785,7 +785,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     let res_ty = cg.any_result_ty();
                     let fty = res_ty.fn_type(&[cg.pair_ty().into(), cg.slice_ty().into()], false);
                     cg.nil_check(fnp);
-                    Some(cg.b.build_indirect_call(fty, fnp, &[p(1).into(), p(2).into()], "").unwrap().try_as_basic_value().left().unwrap())
+                    Some(cg.b.build_indirect_call(fty, fnp, &[p(1).into(), p(2).into()], "").unwrap().try_as_basic_value().basic().unwrap())
                 }
                 Intrinsic::AsFunc(_) => {
                     let fnp = cg.b.build_int_to_ptr(p(0).into_int_value(), ptr, "").unwrap();

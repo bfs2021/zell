@@ -38,7 +38,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         Some(match self.ty(id) {
             Type::Void => return None,
             Type::Bool => self.ctx.bool_type().into(),
-            Type::Int(k) => self.ctx.custom_width_int_type(k.bits()).into(),
+            Type::Int(k) => self.ctx.custom_width_int_type(std::num::NonZeroU32::new(k.bits()).unwrap()).expect("valid int width").into(),
             Type::Float32 => self.ctx.f32_type().into(),
             Type::Float64 => self.ctx.f64_type().into(),
             Type::Char => self.ctx.i32_type().into(),

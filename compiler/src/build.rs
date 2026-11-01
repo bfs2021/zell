@@ -1094,6 +1094,7 @@ fn has_pointers(t: AnyTypeEnum) -> bool {
             BasicTypeEnum::StructType(s) => s.get_field_types().into_iter().any(basic),
             BasicTypeEnum::ArrayType(a) => basic(a.get_element_type()),
             BasicTypeEnum::VectorType(v) => basic(v.get_element_type()),
+            BasicTypeEnum::ScalableVectorType(v) => basic(v.get_element_type()),
             BasicTypeEnum::IntType(_) | BasicTypeEnum::FloatType(_) => false,
         }
     }

@@ -1101,7 +1101,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             self.b.build_unconditional_branch(join).unwrap();
             self.b.position_at_end(join);
         } else {
-            let r = self.b.build_call(ef, &[], "").unwrap().try_as_basic_value().left();
+            let r = self.b.build_call(ef, &[], "").unwrap().try_as_basic_value().basic();
             if let (Some(es), Some(e)) = (err_slot, r) {
                 self.b.build_store(es, e).unwrap();
             }

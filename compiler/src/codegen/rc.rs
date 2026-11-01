@@ -388,7 +388,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.position_at_end(has);
                 if matches!(self.ty(t), Type::Any) {
                     let f = self.any_inline_fn();
-                    let inl = self.b.build_call(f, &[vt.into()], "").unwrap().try_as_basic_value().left().unwrap().into_int_value();
+                    let inl = self.b.build_call(f, &[vt.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_int_value();
                     let boxed = self.block("boxed");
                     self.b.build_conditional_branch(inl, done, boxed).unwrap();
                     self.b.position_at_end(boxed);

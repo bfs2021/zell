@@ -369,7 +369,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let var = di::LLVMDIBuilderCreateAutoVariable(b, scope, np, nl, file, line, dt, 1, 0, 0);
                 let expr = di::LLVMDIBuilderCreateExpression(b, std::ptr::null_mut(), 0);
                 let loc = di::LLVMDIBuilderCreateDebugLocation(self.ctx.raw(), line, col, scope, std::ptr::null_mut());
-                di::LLVMDIBuilderInsertDeclareAtEnd(b, slot.as_value_ref(), var, expr, loc, bb.as_mut_ptr());
+                di::LLVMDIBuilderInsertDeclareRecordAtEnd(b, slot.as_value_ref(), var, expr, loc, bb.as_mut_ptr());
             }
         }
     }
@@ -435,7 +435,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let mut ops: Vec<u64> = if slot.cell { vec![DW_OP_DEREF, DW_OP_PLUS_UCONST, 16] } else { Vec::new() };
             let expr = di::LLVMDIBuilderCreateExpression(b, ops.as_mut_ptr(), ops.len());
             let loc = di::LLVMDIBuilderCreateDebugLocation(self.ctx.raw(), line, col, scope, std::ptr::null_mut());
-            di::LLVMDIBuilderInsertDeclareAtEnd(b, slot.ptr.as_value_ref(), var, expr, loc, bb.as_mut_ptr());
+            di::LLVMDIBuilderInsertDeclareRecordAtEnd(b, slot.ptr.as_value_ref(), var, expr, loc, bb.as_mut_ptr());
         }
         self.dbg.as_mut().unwrap().stack.last_mut().unwrap().declared[l.0 as usize] = true;
     }

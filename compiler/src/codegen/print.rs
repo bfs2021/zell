@@ -94,7 +94,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if let Some((fid, path)) = self.stringer(t) {
             let fv = self.funcs[fid.0 as usize];
             if matches!(self.ty(t), Type::Enum(_)) {
-                return Ok(Val::owned(self.call_fn(fv, &[x.into()]).try_as_basic_value().left().unwrap()));
+                return Ok(Val::owned(self.call_fn(fv, &[x.into()]).try_as_basic_value().basic().unwrap()));
             }
             let p = self.spill(x);
             return Ok(Val::owned(self.call_stringer(t, p, fv, &path)));
@@ -102,7 +102,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         if let Type::Pointer(inner) = *self.ty(t) {
             if self.stringer(inner).is_some() {
                 let f = self.tostr_fn(t)?;
-                return Ok(Val::owned(self.call_fn(f, &[x.into()]).try_as_basic_value().left().unwrap()));
+                return Ok(Val::owned(self.call_fn(f, &[x.into()]).try_as_basic_value().basic().unwrap()));
             }
         }
         Ok(match self.ty(t).clone() {
@@ -123,7 +123,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Type::Char => Val::owned(self.call_rt_v("zell_string_from_rune", &[x.into()])),
             Type::Error => {
                 let f = self.tostr_fn(t)?;
-                Val::owned(self.call_fn(f, &[x.into()]).try_as_basic_value().left().unwrap())
+                Val::owned(self.call_fn(f, &[x.into()]).try_as_basic_value().basic().unwrap())
             }
             Type::Enum(d) if self.prog.enums[d.0 as usize].is_plain => {
                 let names = self.enum_name_table(d.0);
@@ -136,7 +136,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             Type::Slice(_) | Type::Array(..) | Type::Tuple(_) => {
                 let f = self.tostr_fn(t)?;
                 let p = self.spill(x);
-                Val::owned(self.call_fn(f, &[p.into()]).try_as_basic_value().left().unwrap())
+                Val::owned(self.call_fn(f, &[p.into()]).try_as_basic_value().basic().unwrap())
             }
             Type::Pointer(_) | Type::Map(..) | Type::Func(_) | Type::Task(_) | Type::Nil => {
                 // Only nil-ness is printable in v0.1.
@@ -156,7 +156,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 let pair = x.into_struct_value();
                 let data = self.b.build_extract_value(pair, 0, "").unwrap();
                 let ti = self.b.build_extract_value(pair, 1, "").unwrap();
-                Val::owned(self.call_fn(f, &[data.into(), ti.into()]).try_as_basic_value().left().unwrap())
+                Val::owned(self.call_fn(f, &[data.into(), ti.into()]).try_as_basic_value().basic().unwrap())
             }
             Type::Interface(_) => {
                 let isnil = self.nil_test(t, x);
@@ -415,7 +415,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             p = fp;
             t = fty;
         }
-        self.call_fn(f, &[p.into()]).try_as_basic_value().left().unwrap()
+        self.call_fn(f, &[p.into()]).try_as_basic_value().basic().unwrap()
     }
 
     /// `*acc = *acc + s` (the old accumulator is released).

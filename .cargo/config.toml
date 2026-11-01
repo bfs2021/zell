@@ -1,0 +1,5 @@
+# The LLVM release libraries for Windows are built with the static CRT and
+# rpmalloc (LLVM_INTEGRATED_CRT_ALLOC): with the dynamic CRT the process has
+# two heaps and crashes on the first cross-heap free.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

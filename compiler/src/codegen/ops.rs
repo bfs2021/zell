@@ -349,7 +349,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let Some(f) = inkwell::intrinsics::Intrinsic::find(name).and_then(|i| i.get_declaration(&self.module, &[f64t.into()])) else {
             return unsupported(format!("intrinsic {name}"));
         };
-        let r = self.b.build_call(f, &[v.into()], "").unwrap().try_as_basic_value().left().unwrap();
+        let r = self.b.build_call(f, &[v.into()], "").unwrap().try_as_basic_value().basic().unwrap();
         Ok(Some(Val::borrowed(r)))
     }
 

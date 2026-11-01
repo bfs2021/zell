@@ -722,7 +722,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                     // result's references belong to the argument values,
                     // which stay held (or are stable) to the end of the
                     // statement; the result is borrowed from them.
-                    let r = self.call_fn(bf, &ma).try_as_basic_value().left();
+                    let r = self.call_fn(bf, &ma).try_as_basic_value().basic();
                     return Ok(Val { v: r, owned: false });
                 }
                 let fv = self.funcs[fid.0 as usize];
@@ -730,7 +730,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 for h in moved_holds {
                     self.unhold(h);
                 }
-                let r = self.call_fn(fv, &ma).try_as_basic_value().left();
+                let r = self.call_fn(fv, &ma).try_as_basic_value().basic();
                 self.release_temps_from(d);
                 let r = r.map(|v| self.trace_std_call(*fid, e.ty, v, e.span.start));
                 Ok(Val { v: r, owned: true })

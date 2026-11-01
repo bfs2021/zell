@@ -8,10 +8,10 @@ name = "zell"
 path = "src/main.rs"
 
 [dependencies]
-inkwell = { version = "0.5", features = ["llvm18-0"] }
+inkwell = { version = "0.11", default-features = false, features = ["llvm23-1", "target-x86", "target-aarch64", "target-webassembly"] }
 # Raw LLVM C API for what inkwell does not expose (dropping a global's
 # initializer when splitting the module per package). Same version inkwell uses.
-llvm-sys = "180"
+llvm-sys = "231"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"

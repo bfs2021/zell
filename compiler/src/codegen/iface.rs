@@ -62,7 +62,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             }
             let mut args: Vec<BasicMetadataValueEnum> = vec![this.into()];
             args.extend(thunk.get_params().iter().skip(1).map(|p| BasicMetadataValueEnum::from(*p)));
-            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().basic();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
@@ -201,7 +201,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let v = cg.b.build_load(lt, data, "").unwrap();
             let mut args: Vec<BasicMetadataValueEnum> = vec![v.into()];
             args.extend(thunk.get_params().iter().skip(1).map(|p| BasicMetadataValueEnum::from(*p)));
-            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().basic();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
@@ -240,7 +240,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             let this = cg.make_pair(data, vt);
             let mut args: Vec<BasicMetadataValueEnum> = vec![this.into()];
             args.extend(thunk.get_params().iter().skip(1).map(|p| BasicMetadataValueEnum::from(*p)));
-            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().left();
+            let r = cg.b.build_call(target, &args, "").unwrap().try_as_basic_value().basic();
             match r {
                 Some(v) => cg.b.build_return(Some(&v)).unwrap(),
                 None => cg.b.build_return(None).unwrap(),
@@ -262,7 +262,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.b.position_at_end(has);
         let tid = self.b.build_load(self.ptr_ty(), vt, "tid").unwrap().into_pointer_value();
         let f = self.iface_conv_fn(to);
-        let nvt = self.b.build_call(f, &[tid.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+        let nvt = self.b.build_call(f, &[tid.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
         let has_end = self.b.get_insert_block().unwrap();
         self.b.build_unconditional_branch(done).unwrap();
         self.b.position_at_end(done);
@@ -419,7 +419,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         self.with_helper(f, |cg| {
             let obj = f.get_nth_param(0).unwrap().into_pointer_value();
             let p = cg.payload(obj);
-            let r = cg.b.build_call(m, &[p.into()], "").unwrap().try_as_basic_value().left().unwrap();
+            let r = cg.b.build_call(m, &[p.into()], "").unwrap().try_as_basic_value().basic().unwrap();
             cg.b.build_return(Some(&r)).unwrap();
             Ok(())
         })?;
@@ -449,7 +449,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
             // `inner` of a typed error; its Message() is the whole text).
             let m = self.method_entry(sid, "Unwrap")?;
             let p = self.payload(obj);
-            let cause = self.call_fn(m, &[p.into()]).try_as_basic_value().left().unwrap();
+            let cause = self.call_fn(m, &[p.into()]).try_as_basic_value().basic().unwrap();
             let slot = self.byte_gep(e.into_pointer_value(), 24);
             self.b.build_store(slot, cause).unwrap();
         }
@@ -534,7 +534,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_conditional_branch(is_ptr, ptrb, done).unwrap();
                 self.b.position_at_end(ptrb);
                 let f = self.iface_anybox_fn();
-                let obj = self.b.build_call(f, &[tid.into(), data.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                let obj = self.b.build_call(f, &[tid.into(), data.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
                 let pd = self.payload(obj);
                 let ptr_end = self.b.get_insert_block().unwrap();
                 self.b.build_unconditional_branch(done).unwrap();
@@ -696,7 +696,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         for h in moved_holds {
             self.unhold(h);
         }
-        let r = self.call_site(fty, inkwell::values::AsValueRef::as_value_ref(&fnp), &ma, true).try_as_basic_value().left();
+        let r = self.call_site(fty, inkwell::values::AsValueRef::as_value_ref(&fnp), &ma, true).try_as_basic_value().basic();
         self.release_temps_from(dep);
         let _ = ty;
         Ok(Val { v: r, owned: true })
@@ -730,7 +730,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_conditional_branch(utn, typed, done).unwrap();
                 self.b.position_at_end(typed);
                 let f = self.iface_conv_fn(pat);
-                let nvt = self.b.build_call(f, &[ut.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                let nvt = self.b.build_call(f, &[ut.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
                 let ok = self.b.build_is_not_null(nvt, "").unwrap();
                 self.b.build_store(res, ok).unwrap();
                 let pp = self.byte_gep(e, 40);
@@ -789,7 +789,7 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.b.build_conditional_branch(nn, has, done).unwrap();
                 self.b.position_at_end(has);
                 let f = self.iface_conv_fn(pat);
-                let nvt = self.b.build_call(f, &[tid.into()], "").unwrap().try_as_basic_value().left().unwrap().into_pointer_value();
+                let nvt = self.b.build_call(f, &[tid.into()], "").unwrap().try_as_basic_value().basic().unwrap().into_pointer_value();
                 let ok = self.b.build_is_not_null(nvt, "").unwrap();
                 self.b.build_store(res, ok).unwrap();
                 let found = self.block("tt.iface");
