@@ -353,17 +353,19 @@ static bool runnext_take(worker *w, jobrec *out) {
 }
 
 /* Owner: r runs next; a record already there goes behind the ring. */
-static void runnext_put(worker *w, const jobrec *r) {
+static bool runnext_put(worker *w, const jobrec *r) {
     uint32_t s;
+    bool kicked = false;
     for (;;) {
         s = __atomic_load_n(&w->rn_state, __ATOMIC_ACQUIRE);
         if ((s & RN_MASK) == RN_EMPTY) break;
         jobrec old;
-        if (runnext_take_exact(w, s, &old)) { STAT(rn_kick); ring_push_slow(w, &old); }
+        if (runnext_take_exact(w, s, &old)) { STAT(rn_kick); ring_push_slow(w, &old); kicked = true; }
         /* RN_BUSY: a thief is copying it out */
     }
     rec_store(&w->runnext, r);
     __atomic_store_n(&w->rn_state, (s & ~(uint32_t)RN_MASK) + RN_SEQ + RN_FULL, __ATOMIC_SEQ_CST);
+    return kicked;
 }
 
 static inline bool runnext_full(const worker *w) { return (__atomic_load_n(&w->rn_state, __ATOMIC_SEQ_CST) & RN_MASK) == RN_FULL; }
@@ -969,9 +971,16 @@ static void sched_post_ctx(zell_resume_fn fn, void *arg, zell_object *ctx, zell_
     jobrec r = { fn, arg, ctx, cur };
     worker *w = t_w;
     if (w) {
-        if (next && !t_ring_only) runnext_put(w, &r);
-        else ring_push_slow(w, &r);
-        wake_one();
+        if (next && !t_ring_only) {
+            /* Into an empty run-next slot: this worker runs it as soon as
+             * the current job yields; waking another one only has it steal
+             * the job back and forth. A record pushed out to the ring does
+             * wake one. */
+            if (runnext_put(w, &r)) wake_one();
+        } else {
+            ring_push_slow(w, &r);
+            wake_one();
+        }
         return;
     }
     job *j = job_node(&r);
