@@ -81,7 +81,7 @@ typedef struct job {
     struct job *next;
 } job;
 
-#define LOCALQ 256                 /* ring slots per worker (a power of two) */
+#define LOCALQ 1024                /* ring slots per worker (a power of two); an overflow moves half to the global queue, one malloc per job */
 #define MAX_WORKERS 1024           /* core workers + spares, ever */
 #define GLOBAL_EVERY 61            /* ticks between forced looks at the global queue */
 #define RUNNEXT_STREAK 32          /* run-next hand-offs in a row before the ring gets a turn */
