@@ -491,7 +491,7 @@ fn debug(args: &[String]) {
         c.arg("--args").arg(&exe).args(&prog_args);
         c
     } else {
-        let lldb = ["lldb", "lldb-18"].into_iter().find(|l| std::process::Command::new(l).arg("--version").output().is_ok_and(|o| o.status.success())).unwrap_or("lldb");
+        let lldb = ["lldb", "lldb-23"].into_iter().find(|l| std::process::Command::new(l).arg("--version").output().is_ok_and(|o| o.status.success())).unwrap_or("lldb");
         let mut c = std::process::Command::new(lldb);
         c.arg("-O").arg(format!("command script import {}", formatter_script("lldb").display()));
         if batch {

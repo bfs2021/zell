@@ -32,7 +32,8 @@ CC      ?= cc
 AR      ?= ar
 CFLAGS  ?= -O2
 CROSS   ?=
-CLANG   ?= clang
+# clang of the compiler's LLVM first (apt.llvm.org installs only clang-23), then clang.
+CLANG   ?= $(shell command -v clang-23 >/dev/null 2>&1 && echo clang-23 || echo clang)
 SYSROOT ?=
 STUBSDK ?=
 HAVE_CLANG := $(shell command -v $(CLANG) >/dev/null 2>&1 && echo yes)

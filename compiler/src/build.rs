@@ -245,9 +245,9 @@ fn find_clang() -> Result<String, String> {
     // Probed once per process (each probe is a process start).
     static CLANG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     CLANG
-        .get_or_init(|| ["clang-18", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok_and(|o| o.status.success())).map(str::to_string))
+        .get_or_init(|| ["clang-23", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok_and(|o| o.status.success())).map(str::to_string))
         .clone()
-        .ok_or_else(|| "cannot find clang (tried clang-18, clang)".into())
+        .ok_or_else(|| "cannot find clang (tried clang-23, clang)".into())
 }
 
 /// Whether a `--release` host build links the program and the runtime with
@@ -661,7 +661,7 @@ fn macos_dsym(output: &Path, opts: &BuildOptions) {
     if crate::target::current().os != "macos" {
         return;
     }
-    let mut tools: Vec<String> = ["dsymutil", "llvm-dsymutil", "llvm-dsymutil-18"].iter().map(|s| s.to_string()).collect();
+    let mut tools: Vec<String> = ["dsymutil", "llvm-dsymutil", "llvm-dsymutil-23"].iter().map(|s| s.to_string()).collect();
     if let Some(p) = std::env::var_os("LLVM_SYS_180_PREFIX") {
         tools.push(Path::new(&p).join("bin/dsymutil").to_string_lossy().into_owned());
     }

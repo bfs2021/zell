@@ -1579,9 +1579,9 @@ static int mutex_child(const char *mode, int argc, char **argv) {
     return 0;
 }
 
+#if !defined(_WIN32)
 static char *test_argv0;
 
-#if !defined(_WIN32)
 #define MUTEX_CHILD(name, mode) static void name(void) { \
         setenv("ZELL_TEST_MUTEX", mode, 1); \
         char *a[] = { test_argv0, NULL }; \
@@ -1612,7 +1612,9 @@ TEST(mutex_one_worker_yield) {
 int main(int argc, char **argv) {
     const char *child = getenv("ZELL_TEST_MUTEX");
     if (child) return mutex_child(child, argc, argv);
+#if !defined(_WIN32)
     test_argv0 = argv[0];
+#endif
     printf("test_task\n");
     setenv("ZELL_WORKERS", "3", 1);
     int64_t live = zell_live_objects();

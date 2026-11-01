@@ -189,7 +189,7 @@ pub fn find_lld() -> Option<Lld> {
                 return Some(Lld { program: p, multi: true });
             }
         }
-        for name in ["ld.lld-18", "ld.lld"] {
+        for name in ["ld.lld-23", "ld.lld"] {
             if let Some(p) = which(name) {
                 if runs(&p, false) {
                     return Some(Lld { program: p, multi: false });
