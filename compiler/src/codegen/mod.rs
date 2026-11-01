@@ -169,7 +169,9 @@
 //! reads are stored and escaped at entry; [`coro_frame_fixup`] switches a
 //! frame whose destroy function loads LLVM's suspend index to the zeroing
 //! `zell_coro_frame_alloc` after optimisation) and go back with
-//! `zell_coro_frame_free`. The ramp's `zell_coro_enter` / `zell_coro_leave`
+//! `zell_coro_frame_free_sized`; at -O1 and above [`inline_frame_cache`]
+//! then inlines the per-thread frame cache into those calls (ABI.md 10.3
+//! "Frame cache"). The ramp's `zell_coro_enter` / `zell_coro_leave`
 //! are inlined on the thread-local `zell_coro_tls` `{ ctx, cur,
 //! orphan_seq, orphan_on }` (ABI.md 10.2).
 //! An async function that never suspends ([`hir::suspend::plain_async`]:
@@ -309,8 +311,10 @@ mod cleanup;
 mod cycles;
 mod debug;
 mod debug_agent;
+mod frame_cache;
 pub use debug::dedup_declares;
 pub use async_::coro_frame_fixup;
+pub use frame_cache::inline_frame_cache;
 pub use unwind_lower::{lower_unwind, unwind_parent};
 mod expr;
 mod funcs;

@@ -19,6 +19,7 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_coro_frame_alloc", "p:l", false),
     ("zell_coro_frame_alloc_uninit", "p:l", false),
     ("zell_coro_frame_free", "v:p", false),
+    ("zell_coro_frame_free_sized", "v:pl", false),
     ("zell_object_new", "p:pl", false),
     ("zell_cycles_new_entry", "p:pl", false),
     ("zell_cycles_new_dyn", "p:pl", false),

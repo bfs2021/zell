@@ -748,6 +748,9 @@ fn optimise(module: &Module, machine: &TargetMachine, opt: u8) -> Result<(), Str
     module.run_passes(&pipeline, machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: optimisation failed: {}", e.to_string()))?;
     codegen::dedup_declares(module);
     codegen::coro_frame_fixup(module);
+    if opt > 0 {
+        codegen::inline_frame_cache(module, machine)?;
+    }
     codegen::lower_unwind(module);
     if tsan_enabled() {
         instrument_tsan(module, machine)?;

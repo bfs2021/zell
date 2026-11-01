@@ -1655,7 +1655,7 @@ ready:
   br cleanup                                       ; NO final suspend
 
 cleanup:
-  mem = llvm.coro.free(id, hdl); if mem != null: zell_coro_frame_free(mem)
+  mem = llvm.coro.free(id, hdl); if mem != null: zell_coro_frame_free_sized(mem, llvm.coro.size.i64())
   br done
 done:
   llvm.coro.end(hdl, false, none)
@@ -1707,7 +1707,10 @@ Rules the compiler must respect:
   heap's size classes, or `malloc` when the heap is off; **not zeroed**;
   `ZELL_FRAME_POISON=1` fills it with 0xA5 to catch a read of a slot nobody
   wrote) or `zell_coro_frame_alloc(size)` (the same, zeroed), and is released
-  with `zell_coro_frame_free(p)` (NULL ok), possibly on another thread
+  with `zell_coro_frame_free(p)` (NULL ok) or, by the frame's own
+  destroy path, `zell_coro_frame_free_sized(p, size)` with the size it
+  was allocated with (the size class without a heap lookup; NULL ok),
+  possibly on another thread
   (the frame then goes into that thread's cache: LIFO, no atomics, at
   most 1024 frames and 256 KB per thread, the rest goes back to the
   heap; flushed at thread exit and before the leak report; bypassed when
@@ -1729,6 +1732,19 @@ Rules the compiler must respect:
   locals. Guard the allocation with `llvm.coro.alloc` and the free with the
   result of `llvm.coro.free`: a coroutine without suspend points then
   allocates nothing.
+- **Frame cache** (inlined by the compiler at -O1 and above, after the
+  frame fixup): the thread-local `zell_frame_cache` is `{ void *head[36];
+  uint32_t n[36]; int64_t bytes; uint32_t lim; }` (offsets 0, 288, 432,
+  440; 36 = the heap's small size classes: 16-byte steps to 128, then four
+  per power of two up to 16384, `zell__hp_cls`). An inlined allocation of
+  `size` <= 16384 pops `head[cls(size)]` (then `n[c] -= 1`, `bytes -=`
+  the class's block size; the zeroing variant clears `size` bytes) and
+  calls the runtime only when the list is empty; an inlined
+  `zell_coro_frame_free_sized(p, size)` pushes `p` when `n[c] < lim`,
+  `(n[c] + 1) * block size <= 256 KB` and `bytes + block size <= 256 KB`,
+  else calls the runtime. `lim` is 0 (nothing is cached, so inlined code
+  always calls the runtime) until the runtime has seen the heap on and
+  `ZELL_FRAME_POISON` off on that thread; then it is 1024.
 - `await` on a direct call of an async function (`await f()`) reads
   `res.value` when `res.task` is NULL (the value is +1, moved) and otherwise
   awaits `res.task`, which the frame owns and releases after the result is

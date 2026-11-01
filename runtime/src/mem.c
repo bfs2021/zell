@@ -157,6 +157,10 @@ void zell_free(void *p) { free(p); }
  * heap blocks are cached (the heap is off under ASan, so ASan sees every
  * frame), and only small ones. Flushed at thread exit (heap.c calls
  * zell__frame_cache_flush first) and at shutdown before the leak report. */
+/* The compiler inlines both ends of the cache (ABI.md 10.3 "Frame cache"):
+ * the layout, the caps and the size classes are part of the ABI. `lim` is 0
+ * until this thread may cache (heap on, no ZELL_FRAME_POISON), so inlined
+ * code finds the cache empty and full until then and calls the runtime. */
 #define FC_MAX_N 1024
 #define FC_MAX_BYTES ((int64_t)256 << 10)
 #define FC_MAX_TOTAL ((int64_t)256 << 10)
@@ -165,9 +169,13 @@ typedef struct {
     void *head[ZELL__HP_CLASSES];
     uint32_t n[ZELL__HP_CLASSES];
     int64_t bytes;
-} frame_cache;
+    uint32_t lim;
+} zell_frame_cache_t;
 
-static _Thread_local frame_cache t_fc;
+_Thread_local zell_frame_cache_t zell_frame_cache;
+_Static_assert(ZELL__HP_CLASSES == 36 && offsetof(zell_frame_cache_t, n) == 288 && offsetof(zell_frame_cache_t, bytes) == 432
+               && offsetof(zell_frame_cache_t, lim) == 440, "ABI.md 10.3: zell_frame_cache layout");
+#define t_fc zell_frame_cache
 
 void zell__frame_cache_flush(void) {
     for (uint32_t c = 0; c < ZELL__HP_CLASSES; c++) {
@@ -226,6 +234,25 @@ void *zell_coro_frame_alloc_uninit(int64_t size) {
     return p;
 }
 
+/* Puts small block p of class c (block size sz) into this thread's frame
+ * cache, or back to the heap when the cache is full. */
+static inline __attribute__((always_inline)) void frame_cache_put(void *p, uint32_t c, int64_t sz) {
+    uint32_t n = t_fc.n[c];
+    if (__builtin_expect(!t_fc.lim, 0)) {
+        int poison = __atomic_load_n(&g_frame_poison, __ATOMIC_RELAXED);
+        if (poison < 0) poison = frame_poison_init();
+        if (!poison) t_fc.lim = FC_MAX_N;
+    }
+    if (n < t_fc.lim &&(int64_t)(n + 1) * sz <= FC_MAX_BYTES && t_fc.bytes + sz <= FC_MAX_TOTAL) {
+        *(void **)p = t_fc.head[c];
+        t_fc.head[c] = p;
+        t_fc.n[c] = n + 1;
+        t_fc.bytes += sz;
+        return;
+    }
+    zell__heap_free_small(p);
+}
+
 void zell_coro_frame_free(void *p) {
     if (!p) return;
     if (!zell__heap_on) {
@@ -237,17 +264,20 @@ void zell_coro_frame_free(void *p) {
         return;
     }
     hp_page *pg = zell__hp_page_of(p);
-    int64_t sz = pg->bsize;
-    uint32_t c = pg->cls;
-    uint32_t n = t_fc.n[c];
-    if (n < FC_MAX_N && (int64_t)(n + 1) * sz <= FC_MAX_BYTES && t_fc.bytes + sz <= FC_MAX_TOTAL) {
-        *(void **)p = t_fc.head[c];
-        t_fc.head[c] = p;
-        t_fc.n[c] = n + 1;
-        t_fc.bytes += sz;
+    frame_cache_put(p, pg->cls, pg->bsize);
+}
+
+/* The size the frame was allocated with gives its class directly: no
+ * segment-map lookup, no page header read (ABI.md 10.3). */
+void zell_coro_frame_free_sized(void *p, int64_t size) {
+    if (!p) return;
+    if (size < 16) size = 16;
+    if (__builtin_expect(!zell__heap_on || size > ZELL__HP_SMALL_MAX, 0)) {
+        zell_coro_frame_free(p);
         return;
     }
-    zell__heap_free_small(p);
+    uint32_t c = zell__hp_cls(size);
+    frame_cache_put(p, c, zell__hp_sizes[c]);
 }
 
 /* ---- objects ---- */

@@ -271,7 +271,10 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
         let has = self.b.build_is_not_null(frv, "").unwrap();
         self.b.build_conditional_branch(has, free, done).unwrap();
         self.b.position_at_end(free);
-        self.call_rt("zell_coro_frame_free", &[frv.into()]);
+        // The frame's size (a constant after CoroSplit) gives its size
+        // class without a heap lookup.
+        let fsz = self.intrinsic("llvm.coro.size.i64", &mut []);
+        self.call_rt("zell_coro_frame_free_sized", &[frv.into(), unsafe { IntValue::new(fsz) }.into()]);
         self.b.build_unconditional_branch(done).unwrap();
         self.b.position_at_end(done);
         let fls = self.ctx.bool_type().const_zero().as_value_ref();

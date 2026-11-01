@@ -135,6 +135,7 @@ void  zell_free(void *p);                    /* raw; NULL ok */
 void *zell_coro_frame_alloc(int64_t size);   /* zeroed coroutine frame (10.3) */
 void *zell_coro_frame_alloc_uninit(int64_t size);   /* the same, not zeroed (10.3) */
 void  zell_coro_frame_free(void *p);         /* frees it; NULL ok */
+void  zell_coro_frame_free_sized(void *p, int64_t size); /* frees a frame allocated with `size`; NULL ok */
 
 void *zell_object_new(const zell_type_info *type, int64_t size); /* rc=1, zeroed, size includes header */
 void  zell_retain(void *obj);                /* NULL / immortal: no-op */
