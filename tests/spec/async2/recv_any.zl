@@ -1,0 +1,53 @@
+// test: task.RecvAny waits on several channels at once: every value arrives exactly once, a closed and drained channel reports false (and is dropped by the caller), an empty slice gives -1 at once
+// status: passing
+namespace spec.async2.recv_any
+
+import io
+
+async func produce(ch task.Channel<int>, base int, n int) {
+    for i in 0..n {
+        await ch.Send(base + i)
+    }
+    ch.Close()
+}
+
+async func main() {
+    var chs []task.Channel<int> = []
+    var ps []Task<void> = []
+    for k in 0..3 {
+        var ch = task.Channel<int>(k)   // unbuffered, 1 and 2
+        chs = append(chs, ch)
+        ps = append(ps, produce(ch, k * 1000, 100))
+    }
+    var open = chs
+    var sum = 0
+    var got = 0
+    var closed = 0
+    for len(open) > 0 {
+        var r = await task.RecvAny(open)
+        if r.2 {
+            sum += r.1
+            got += 1
+            continue
+        }
+        closed += 1
+        var still []task.Channel<int> = []
+        for i in 0..len(open) {
+            if i != r.0 {
+                still = append(still, open[i])
+            }
+        }
+        open = still
+    }
+    await task.All(ps)
+    println("got", got, "sum", sum, "closed", closed)
+
+    var none []task.Channel<int> = []
+    var e = await task.RecvAny(none)
+    println("empty", e.0, e.1, e.2)
+
+    var b = task.Channel<string>(2)
+    await b.Send("ready")
+    var s = await task.RecvAny([task.Channel<string>(0), b])
+    println("buffered", s.0, s.1, s.2)
+}

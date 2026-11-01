@@ -3,10 +3,8 @@ namespace bench.select_many
 import io
 
 // First-of-many: one consumer takes 2M events from whichever of 8
-// unbuffered channels is ready (8 producers, 250k events each). Zell has
-// no `select` statement; the consumer keeps one pending Recv per channel
-// and waits with task.Any, which cancels the losers, so each event re-arms
-// the receives (a loser that already took a value still delivers it).
+// unbuffered channels is ready (8 producers, 250k events each), with
+// task.RecvAny: one wait on all the channels per event, like Go's select.
 // For reference, the same events through a merge channel fed by 8
 // forwarder tasks (the select-free idiom).
 
@@ -22,25 +20,19 @@ async func selectLoop(chs []task.Channel<int>, total int) int {
     var got = 0
     var open = chs
     for got < total {
-        var pending []Task<int!> = []
-        for c in open {
-            pending = append(pending, c.Recv())
-        }
-        _ = await task.Any(pending...)
-        // A closed, drained channel leaves the set (the Go version sets it
-        // to nil): receiving from it again would complete at once and turn
-        // the loop into a busy poll. A loser that Any cancelled stays.
-        var still []task.Channel<int> = []
-        for i in 0..len(pending) {
-            var v = try await pending[i] catch _ {
-                if !(open[i].IsClosed() && open[i].Len() == 0) {
-                    still = append(still, open[i])
-                }
-                continue
-            }
-            sum += v
+        var r = await task.RecvAny(open)
+        if r.2 {
+            sum += r.1
             got += 1
-            still = append(still, open[i])
+            continue
+        }
+        // A closed, drained channel leaves the set (the Go version sets it
+        // to nil): RecvAny would report it again at once.
+        var still []task.Channel<int> = []
+        for i in 0..len(open) {
+            if i != r.0 {
+                still = append(still, open[i])
+            }
         }
         open = still
     }

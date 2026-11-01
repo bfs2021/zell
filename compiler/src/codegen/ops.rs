@@ -540,6 +540,24 @@ impl<'a, 'ctx> CodeGen<'a, 'ctx> {
                 self.drop_val(args[0].ty, sv);
                 Ok(Val::owned(t))
             }
+            Builtin::ChanRecvAny { tuple } => {
+                // The runtime writes the index at 0 and the value and the
+                // status at their field offsets in the compiled tuple.
+                let d = self.depth();
+                let sv = self.expr(&args[0])?;
+                self.hold(args[0].ty, sv);
+                self.forget_from(d);
+                let s = sv.get().into_struct_value();
+                let data = self.b.build_extract_value(s, 0, "any.data").unwrap();
+                let len = self.b.build_extract_value(s, 1, "any.len").unwrap();
+                let i64t = self.i64_ty();
+                let size = i64t.const_int(self.size_of(tuple), false);
+                let voff = i64t.const_int(self.field_offset(tuple, 1), false);
+                let ooff = i64t.const_int(self.field_offset(tuple, 2), false);
+                let t = self.call_rt_v("zell_task_chan_recv_any", &[data.into(), len.into(), size.into(), voff.into(), ooff.into()]);
+                self.drop_val(args[0].ty, sv);
+                Ok(Val::owned(t))
+            }
             Builtin::ChanRecv | Builtin::ChanNext => {
                 let h = self.expr(&args[0])?.get();
                 let f = if op == Builtin::ChanRecv { "zell_task_chan_recv" } else { "zell_task_chan_next" };

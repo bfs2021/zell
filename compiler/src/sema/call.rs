@@ -766,7 +766,7 @@ impl<'a> Sema<'a> {
                 self.check_args_loose(args);
                 self.invalid(span)
             }
-            Special::ChanNew | Special::ChanSend | Special::ChanRecv | Special::ChanNext => {
+            Special::ChanNew | Special::ChanSend | Special::ChanRecv | Special::ChanNext | Special::ChanRecvAny => {
                 self.err("this channel intrinsic needs a type argument (use task.Channel<T>)", span);
                 self.check_args_loose(args);
                 self.invalid(span)

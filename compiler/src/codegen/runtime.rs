@@ -28,6 +28,7 @@ const RUNTIME: &[(&str, &str, bool)] = &[
     ("zell_task_chan_new", "l:llplpllpl", false),
     ("zell_task_chan_send", "p:lp", false),
     ("zell_task_chan_recv", "p:l", false),
+    ("zell_task_chan_recv_any", "p:pllll", false),
     ("zell_task_chan_next", "p:l", false),
     ("zell_retain", "v:p", false),
     ("zell_release", "v:p", false),

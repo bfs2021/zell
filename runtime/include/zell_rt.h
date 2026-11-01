@@ -700,6 +700,18 @@ void zell_task_chan_close(int64_t h);
 int64_t zell_task_chan_len(int64_t h);
 int64_t zell_task_chan_cap(int64_t h);
 bool zell_task_chan_is_closed(int64_t h);
+/* select (10.7 "Select"): one wait on several channel operations. A case
+ * with chan == 0 is off. Receive: the value is moved to *elem and *ok (may
+ * be NULL) is 1, or 0 with the zero value when the channel is closed and
+ * drained. Send: *elem is copied and retained (the caller keeps its own).
+ * Task<int>, +1: the index of the case that fired, -1 with has_default
+ * when none is ready or when the waiting task is cancelled. */
+typedef struct zell_select_case { int64_t chan; int64_t send; void *elem; uint8_t *ok; } zell_select_case;
+zell_task *zell_task_select(const zell_select_case *cases, int64_t n, int64_t has_default);
+/* task.RecvAny: the first of n channels (handles) to deliver; the result
+ * (res_size bytes) is (index int @0, value T @val_off, ok bool @ok_off),
+ * index -1 for no channels or a cancelled wait. +1. */
+zell_task *zell_task_chan_recv_any(const int64_t *hs, int64_t n, int64_t res_size, int64_t val_off, int64_t ok_off);
 
 /* task.Mutex (task_sync.c, ABI.md 10.6): m points at the struct's three
  * int words { state, waitHead, waitTail }, all zero when unlocked. */

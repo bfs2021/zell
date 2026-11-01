@@ -893,6 +893,11 @@ pub enum Builtin {
     ChanRecv,
     /// `args = [handle]`: `Task<(T, bool)>` (runtime `zell_task_chan_next`).
     ChanNext,
+    /// `args = [handles []int]`: `Task<(int, T, bool)>` (`tuple`; runtime
+    /// `zell_task_chan_recv_any`): the index of the first channel to
+    /// deliver with its value and true, or of a closed, drained one with
+    /// the zero value and false; -1 for no channels or a cancelled wait.
+    ChanRecvAny { tuple: TypeId },
     /// `args = [[]Task<T>, fallible bool]`: `Task<int>` (runtime
     /// `zell_task_all_cancel`): done once every task has settled, holding
     /// the index of the first one that failed (-1 if none); that failure

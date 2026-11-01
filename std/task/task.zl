@@ -160,6 +160,21 @@ struct Channel<T> {
     }
 }
 
+// RecvAny waits for the first of chs to deliver (one wait on all of
+// them, no task per channel): its index, the value and true; or the index
+// of a channel that is closed and drained, the zero value and false (drop
+// it from chs, or the next RecvAny returns it again at once). When several
+// are ready, one is picked at random. -1 for an empty chs or a cancelled
+// wait. The statement form with mixed channels, sends and a default is
+// `select` (DESIGN.md "Асинхронность").
+func RecvAny<T>(chs []Channel<T>) Task<(int, T, bool)> {
+    var hs []int = []
+    for c in chs {
+        hs = append(hs, c.st.h)
+    }
+    return rtChanRecvAny<T>(hs)
+}
+
 // The runtime channel shared by the copies of a Channel; released with
 // the last one.
 struct chanRef {

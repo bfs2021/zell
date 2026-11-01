@@ -4,7 +4,7 @@
 //! sized-slice intrinsic `encoding.json.rtMake<T>(n)` of the typed JSON
 //! decoder (`reflect_src/json.zl`); and the `task` channel ones,
 //! `rtChanNew<T>(cap)`, `rtChanSend<T>(h, v)`, `rtChanRecv<T>(h)` and
-//! `rtChanNext<T>(h)`, used by `task.Channel<T>` in `stdlib_src/task.zl`
+//! `rtChanNext<T>(h)` and `rtChanRecvAny<T>(hs)`, used by `task.Channel<T>` in `stdlib_src/task.zl`
 //! (runtime/ABI.md 10.7). All take exactly one type argument, which the
 //! Zell source spells out.
 
@@ -18,7 +18,7 @@ impl<'a> Sema<'a> {
     /// if `sp` takes none.
     pub(crate) fn typed_special(&mut self, sp: Special, targs: &[ast::TypeExpr], args: &[ast::Expr], span: Span) -> Option<hir::Expr> {
         let want = match sp {
-            Special::ArenaNew | Special::JsonMake | Special::ChanNew | Special::ChanRecv | Special::ChanNext => 1,
+            Special::ArenaNew | Special::JsonMake | Special::ChanNew | Special::ChanRecv | Special::ChanNext | Special::ChanRecvAny => 1,
             Special::ArenaAlloc | Special::ChanSend => 2,
             _ => return None,
         };
@@ -34,8 +34,10 @@ impl<'a> Sema<'a> {
             return Some(self.invalid(span));
         }
         let int = self.tt.int;
-        // The first argument is always an `int` handle; `rtChanSend`'s second is a `T`.
-        let mut hargs: Vec<hir::Expr> = vec![self.expr_to(&args[0], int, Ctx::Other)];
+        // The first argument is an `int` handle (`[]int` handles for
+        // `rtChanRecvAny`); `rtChanSend`'s second is a `T`.
+        let first = if sp == Special::ChanRecvAny { self.tt.slice(int) } else { int };
+        let mut hargs: Vec<hir::Expr> = vec![self.expr_to(&args[0], first, Ctx::Other)];
         if args.len() == 2 {
             let second = if sp == Special::ChanSend { t } else { int };
             hargs.push(self.expr_to(&args[1], second, Ctx::Other));
@@ -58,6 +60,10 @@ impl<'a> Sema<'a> {
             Special::ChanRecv => {
                 let fallible = self.tt.fallible(t);
                 (Builtin::ChanRecv, self.tt.task(fallible))
+            }
+            Special::ChanRecvAny => {
+                let tuple = self.tt.tuple(vec![int, t, bool_]);
+                (Builtin::ChanRecvAny { tuple }, self.tt.task(tuple))
             }
             _ => {
                 let tuple = self.tt.tuple(vec![t, bool_]);

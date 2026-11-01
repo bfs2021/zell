@@ -610,6 +610,133 @@ TEST(channel_async_and_strings) {
     zell_release(a); zell_release(b); zell_release(c);
 }
 
+/* ---- select (ABI.md 10.7 "Select") ---- */
+
+#define H(c) ((int64_t)(intptr_t)(c))
+static int64_t sel_idx(zell_task *s) { return *(int64_t *)zell_task_result(s); }
+
+TEST(select_ready_default_closed) {
+    zell_chan *a = zell_chan_new(8, NULL, 0), *b = zell_chan_new(8, NULL, 1);
+    int64_t seven = 7, va = -1, vb = -1;
+    zell_chan_send(b, &seven);                              /* buffered */
+    uint8_t oka = 9, okb = 9;
+    zell_select_case cs[2] = { { H(a), 0, &va, &oka }, { H(b), 0, &vb, &okb } };
+    zell_task *s = zell_task_select(cs, 2, 0);
+    assert(zell_task_is_done(s) && sel_idx(s) == 1 && vb == 7 && okb == 1);
+    zell_release(s);
+    s = zell_task_select(cs, 2, 1);                         /* nothing ready: the default */
+    assert(zell_task_is_done(s) && sel_idx(s) == -1);
+    zell_release(s);
+    zell_chan_close(a);
+    s = zell_task_select(cs, 2, 0);                         /* closed: ok = 0, zero value */
+    assert(sel_idx(s) == 0 && oka == 0 && va == 0);
+    zell_release(s);
+    zell_select_case off[1] = { { 0, 0, &va, NULL } };      /* a case that is off never fires */
+    s = zell_task_select(off, 1, 1);
+    assert(sel_idx(s) == -1);
+    zell_release(s);
+    zell_release(a); zell_release(b);
+}
+
+TEST(select_waits_and_unqueues_losers) {
+    zell_chan *a = zell_chan_new(8, NULL, 0), *b = zell_chan_new(8, NULL, 0);
+    int64_t va = -1, vb = -1, x = 41;
+    zell_select_case cs[2] = { { H(a), 0, &va, NULL }, { H(b), 0, &vb, NULL } };
+    zell_task *s = zell_task_select(cs, 2, 0);
+    assert(!zell_task_is_done(s));
+    zell_task *snd = zell_chan_send_async(b, &x);           /* hands off to the select */
+    assert(zell_task_is_done(snd) && zell_task_is_done(s) && sel_idx(s) == 1 && vb == 41 && va == -1);
+    zell_task *snd2 = zell_chan_send_async(a, &x);          /* the loser on `a` is gone: this waits */
+    assert(!zell_task_is_done(snd2));
+    int64_t got;
+    assert(zell_chan_recv(a, &got) && got == 41);
+    zell_release(snd); zell_release(snd2); zell_release(s);
+    zell_release(a); zell_release(b);
+}
+
+TEST(select_send_cases) {
+    zell_chan *a = zell_chan_new(sizeof(zell_string *), &zell_ops_ref, 0);
+    zell_chan *b = zell_chan_new(sizeof(zell_string *), &zell_ops_ref, 0);
+    zell_string *x = S("x"), *y = S("y"), *got = NULL;
+    zell_task *r = zell_chan_recv_async(a);                 /* a receiver waits on a */
+    zell_select_case cs[2] = { { H(a), 1, &x, NULL }, { H(b), 1, &y, NULL } };
+    zell_task *s = zell_task_select(cs, 2, 0);              /* sends x to it at once */
+    assert(sel_idx(s) == 0 && zell_task_is_done(r));
+    assert(*(zell_string **)((unsigned char *)zell_task_result(r) + 8) == x);
+    zell_release(s); zell_release(r);
+    s = zell_task_select(cs, 2, 0);                         /* nobody receives: both wait */
+    assert(!zell_task_is_done(s));
+    assert(zell_chan_recv(b, &got) && got == y && sel_idx(s) == 1);
+    zell_release(got);
+    zell_release(s);
+    zell_release(a); zell_release(b);
+    /* every copy the select made is released (the one on `a` without firing) */
+    assert(zell_refcount(x) == 1 && zell_refcount(y) == 1);
+    zell_release(x); zell_release(y);
+}
+
+TEST(select_cancel_and_recv_any) {
+    zell_chan *a = zell_chan_new(8, NULL, 0), *b = zell_chan_new(8, NULL, 4);
+    int64_t v = 0, x = 5;
+    zell_select_case cs[2] = { { H(a), 0, &v, NULL }, { H(b), 0, &v, NULL } };
+    zell_task *s = zell_task_select(cs, 2, 0);
+    zell_task_cancel(s);                                    /* no case fires */
+    assert(zell_task_is_done(s) && sel_idx(s) == -1);
+    zell_task *snd = zell_chan_send_async(a, &x);           /* its entries left the queues */
+    assert(!zell_task_is_done(snd));
+    zell_release(s);
+    int64_t hs[2] = { H(a), H(b) };
+    zell_task *r = zell_task_chan_recv_any(hs, 2, 24, 8, 16);   /* (int, int, bool) */
+    unsigned char *res = zell_task_result(r);
+    assert(*(int64_t *)res == 0 && *(int64_t *)(res + 8) == 5 && res[16] == 1 && zell_task_is_done(snd));
+    zell_release(r); zell_release(snd);
+    r = zell_task_chan_recv_any(hs, 0, 24, 8, 16);          /* no channels: -1 at once */
+    assert(*(int64_t *)zell_task_result(r) == -1);
+    zell_release(r);
+    zell_release(a); zell_release(b);
+}
+
+/* 4 producers on 4 threads' worth of tasks, one consumer selecting over
+ * their channels until all are closed: every value arrives exactly once
+ * and the entries of the losing cases never swallow one. */
+typedef struct { zell_chan *ch; int64_t base, n; } sel_prod;
+
+static void sel_producer(zell_task *t, void *ctx) {
+    sel_prod *p = ctx;
+    for (int64_t i = 0; i < p->n; i++) { int64_t v = p->base + i; zell_chan_send(p->ch, &v); }
+    zell_chan_close(p->ch);
+    zell_task_complete(t, NULL);
+}
+
+TEST(select_stress) {
+    enum { K = 4, N = 20000 };
+    zell_chan *ch[K];
+    sel_prod ps[K];
+    zell_task *pt[K];
+    for (int i = 0; i < K; i++) {
+        ch[i] = zell_chan_new(8, NULL, i & 1);
+        ps[i] = (sel_prod){ ch[i], (int64_t)i * 1000000, N };
+        pt[i] = zell_task_spawn(sel_producer, &ps[i]);
+    }
+    int64_t sum = 0, got = 0, v[K];
+    uint8_t ok[K];
+    bool open[K] = { true, true, true, true };
+    for (int live = K; live > 0;) {
+        zell_select_case cs[K];
+        for (int i = 0; i < K; i++) cs[i] = (zell_select_case){ open[i] ? H(ch[i]) : 0, 0, &v[i], &ok[i] };
+        zell_task *s = zell_task_select(cs, K, 0);
+        zell_task_await(s);
+        int64_t i = sel_idx(s);
+        zell_release(s);
+        assert(i >= 0 && i < K);
+        if (ok[i]) { sum += v[i]; got++; } else { open[i] = false; live--; }
+    }
+    int64_t want = 0;
+    for (int i = 0; i < K; i++) want += (int64_t)i * 1000000 * N + (int64_t)N * (N - 1) / 2;
+    assert(got == (int64_t)K * N && sum == want);
+    for (int i = 0; i < K; i++) { zell_task_await(pt[i]); zell_release(pt[i]); zell_release(ch[i]); }
+}
+
 /* ---- work stealing: one worker floods its local queue (the ring
  * overflows to the global queue), the other workers drain it ---- */
 
@@ -1649,6 +1776,11 @@ int main(int argc, char **argv) {
     RUN(channel_unbuffered);
     RUN(channel_buffered);
     RUN(channel_async_and_strings);
+    RUN(select_ready_default_closed);
+    RUN(select_waits_and_unqueues_losers);
+    RUN(select_send_cases);
+    RUN(select_cancel_and_recv_any);
+    RUN(select_stress);
     RUN(channel_capacities);
     RUN(channel_fan_in_10k);
     RUN(await_wakes_one_thread);

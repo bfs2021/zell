@@ -2089,6 +2089,29 @@ task is still returned (the compiled `Recv` is a first-class `Task<T!>`). The
 wait holds a reference to the channel while queued, so a channel with
 waiters is never freed.
 
+**Select** (one wait on several channel operations; `task.RecvAny` and the
+`select` statement):
+
+| Function | Semantics |
+|---|---|
+| `zell_task *zell_task_select(const zell_select_case *cs, n, has_default)` | `zell_select_case = { int64_t chan; int64_t send; void *elem; uint8_t *ok; }`; `chan == 0`: the case is off. Receive: the value is **moved** to `*elem` and `*ok` (may be NULL) is 1, or 0 with the zero value for a closed, drained channel. Send: `*elem` is copied and retained at the call (the caller keeps and releases its own); panics `send on closed channel` when that case is chosen. `Task<int>`, +1: the index of the case that fired, `-1` with `has_default` when no case is ready at the call, and `-1` for a select of a cancelled task (at the call, or while waiting; then no case fires). `elem`/`ok` must stay valid until the task is done (the compiled statement points them into its frame) |
+| `zell_task *zell_task_chan_recv_any(const int64_t *hs, n, res_size, val_off, ok_off)` | `task.RecvAny`: receive cases on `n` channel handles with one destination: the result is `(int index @0, T @val_off, bool @ok_off)` of `res_size` bytes (the slot owns the value; released with T's ops). `n == 0`: `-1` at once. +1 |
+
+When several cases are ready at the call, the scan starts at a random case
+(no case starves). The call locks the distinct channels in address order
+(so two selects never deadlock), takes the first ready case, or else queues
+one entry per case, under those locks. An entry is a `chan_wait` header with
+`sel` set (the plain waits have NULL), all in the select task's slot after
+the result. Whoever dequeues an entry first claims the select (an atomic
+flag in the slot); entries of a claimed select are stale: a channel that
+dequeues one unlinks it and releases what it held (the queue's reference to
+the select task, the channel's, a send copy) without effect. The claiming
+side finishes the case after dropping the channel lock, then takes the
+other entries out of their queues one channel lock at a time. Cancellation
+(the starter's cancel hook, or `zell_task_cancel` on the select task) claims
+the select with `-1`. `zell_task_chan_close` panics only for live senders: a
+stale send entry does not count.
+
 **C API** (tests and C code; receives have the `{ int64_t ok @0; T value @8 }`
 layout, `result_size = 8 + elem_size`; `ok = 1` means a value was received and
 the slot owns it, `ok = 0` means closed and drained or cancelled, and the value

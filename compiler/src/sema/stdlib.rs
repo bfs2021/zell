@@ -384,6 +384,9 @@ pub enum Special {
     /// `task.rtChanNext<T>(h int) Task<(T, bool)>` →
     /// [`crate::hir::Builtin::ChanNext`] (the iteration protocol).
     ChanNext,
+    /// `task.rtChanRecvAny<T>(hs []int) Task<(int, T, bool)>` →
+    /// [`crate::hir::Builtin::ChanRecvAny`] (`task.RecvAny`).
+    ChanRecvAny,
     /// `task.rtAllCancel(ts []Task<T>, fallible bool) Task<int>` →
     /// [`crate::hir::Builtin::TaskAllCancel`] (the slice forms of `task.All`).
     TaskAllCancel,
@@ -407,6 +410,7 @@ pub const SPECIALS: &[(&str, &str, Special)] = &[
     ("task", "rtChanSend", Special::ChanSend),
     ("task", "rtChanRecv", Special::ChanRecv),
     ("task", "rtChanNext", Special::ChanNext),
+    ("task", "rtChanRecvAny", Special::ChanRecvAny),
     ("task", "rtAllCancel", Special::TaskAllCancel),
 ];
 
