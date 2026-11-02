@@ -476,7 +476,7 @@ static void due_now(void) {
     __atomic_store_n(&g_want, 1, __ATOMIC_RELAXED);
 }
 
-/* The buffer is full: drop its holes and zombies; keep it when that made
+/* The buffer is full: drop its holes and zombies (flush_buf); keep it when that made
  * room, grow it while it is small, else publish its live entries (always
  * with `all`). */
 static void flush_local(int all) {
@@ -490,12 +490,17 @@ static void flush_local(int all) {
 
 static void flush_buf(lbuf *t, int all) {
     int64_t j = 0;
-    /* Close the holes left by entries that died here; zombies (entries
-     * that died on another thread) are only swept when publishing. */
+    /* Close the holes left by entries that died here and free the zombies
+     * (entries that died on another thread: in an async program, where
+     * tasks move between workers, that is most of them). Sweeping only
+     * when publishing kept every zombie's memory until the next
+     * collection request, which an adaptive threshold that found no
+     * garbage pushes out to THRESHOLD_MAX records: ~100 MB of dead
+     * objects in an HTTP server under load. */
     for (int64_t i = 0; i < t->n; i++) {
         zell_object *e = t->v[i];
         if (!e) continue;
-        if (all && !sweep_entry(e)) continue;
+        if (!sweep_entry(e)) continue;
         t->v[j++] = e;
     }
     t->n = t->live = j;
