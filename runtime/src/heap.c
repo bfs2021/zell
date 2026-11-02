@@ -216,15 +216,42 @@ static inline void note_peak(void) {
     }
 }
 
+/* The memory limit (DESIGN.md "Память"): ZELL_MEMLIMIT, else the
+ * container's (zell__plat_mem_limit), else none (0); runtime.SetMemLimit
+ * changes it. The heap aims at 15/16 of it (the rest is for thread stacks,
+ * code and malloc) by keeping no reserve that would pass the target, so
+ * memory freed near the limit goes back to the OS at once. */
+static int64_t g_mem_limit;               /* atomic, bytes; 0: none */
+static const char *g_mem_limit_src;
+static zell__plat_once g_limit_once = ZELL_PLAT_ONCE_INIT;
+
+static inline int64_t mem_target(int64_t lim) { return lim - lim / 16; }
+
+/* What a reserve may hold under the limit: up to the target, 0 past it. */
+static inline int64_t limit_room(void) {
+    int64_t lim = __atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED);
+    if (!lim) return INT64_MAX;
+    int64_t r = mem_target(lim) - __atomic_load_n(&g_in_use, __ATOMIC_RELAXED);
+    return r > 0 ? r : 0;
+}
+
+/* The reserve the scavenger keeps: g_reserve_min, within the limit. */
+static inline int64_t reserve_floor(void) {
+    int64_t m = __atomic_load_n(&g_reserve_min, __ATOMIC_RELAXED), r = limit_room();
+    return m < r ? m : r;
+}
+
 /* Free memory kept synchronously: what keeps in use + kept within the
  * recent peak (so the process does not grow past what it needed lately),
- * and at least g_reserve_min. */
+ * and at least g_reserve_min; never past the memory limit's target. */
 static inline int64_t reserve_limit(void) {
     int64_t m = __atomic_load_n(&g_reserve_min, __ATOMIC_RELAXED);
     int64_t a = __atomic_load_n(&g_peak_cur, __ATOMIC_RELAXED), b = __atomic_load_n(&g_peak_prev, __ATOMIC_RELAXED);
     if (a < b) a = b;
     a -= __atomic_load_n(&g_in_use, __ATOMIC_RELAXED);
-    return a > m ? a : m;
+    if (a < m) a = m;
+    int64_t r = limit_room();
+    return a < r ? a : r;
 }
 
 typedef struct { void *p; size_t len; hp_page *pg; } victim;   /* pg NULL: unmap p */
@@ -297,6 +324,23 @@ static void trim(int64_t limit) {
     }
 }
 
+/* Under a memory limit, growth shrinks what the reserve may hold: each
+ * time the heap in use grew by 1 MB since the last look, the reserve over
+ * the new room goes back to the OS (wave B of objects of other sizes does
+ * not stack on wave A's freed pages). g_mu NOT held. */
+static int64_t g_limit_mark;   /* atomic: in use at the last look */
+
+static inline void limit_grow(void) {
+    if (!__atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED)) return;
+    int64_t u = __atomic_load_n(&g_in_use, __ATOMIC_RELAXED), m = __atomic_load_n(&g_limit_mark, __ATOMIC_RELAXED);
+    if (u - m < ((int64_t)1 << 20)) {
+        if (u < m) __atomic_store_n(&g_limit_mark, u, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_store_n(&g_limit_mark, u, __ATOMIC_RELAXED);
+    trim(reserve_limit());
+}
+
 /* ---- the scavenger ----
  * A background thread (started the first time free memory exceeds
  * g_reserve_min; it never touches objects, so zell_threaded stays 0):
@@ -314,7 +358,7 @@ static int g_scav_state;              /* 0 not started, 1 working, 2 waiting for
 
 /* Whether the scavenger must be started or woken (g_mu held). */
 static inline int scav_wanted_locked(void) {
-    return g_scav_state != 1 && g_free_bytes + g_cache_bytes > __atomic_load_n(&g_reserve_min, __ATOMIC_RELAXED);
+    return g_scav_state != 1 && g_free_bytes + g_cache_bytes > reserve_floor();
 }
 
 static void *scav_main(void *arg) {
@@ -322,7 +366,7 @@ static void *scav_main(void *arg) {
     victim v[TRIM_BATCH];
     zell__plat_mutex_lock(&g_mu);
     for (;;) {
-        int64_t min = __atomic_load_n(&g_reserve_min, __ATOMIC_RELAXED);
+        int64_t min = reserve_floor();
         if (g_free_bytes + g_cache_bytes <= min) {
             g_scav_state = 2;
             zell__plat_cond_wait(&g_scav_cv, &g_mu);
@@ -341,6 +385,8 @@ static void *scav_main(void *arg) {
             if (!n) break;
             trim_apply(v, n);
         }
+        /* under a memory limit, malloc's free memory (medium objects) goes too */
+        if (__atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED)) zell__plat_malloc_trim();
         zell__plat_mutex_lock(&g_mu);
     }
     return NULL;
@@ -383,7 +429,7 @@ static hp_page *page_acquire(hp_heap *h, uint32_t c) {
             /* From the second segment on, huge pages: a heap that grew past
              * 4 MB takes far fewer page faults, a small program keeps its
              * small RSS. */
-            if (g_segments) zell__plat_mem_hint_huge(s, HP_SEG);
+            if (g_segments && limit_room() > __atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED) / 2) zell__plat_mem_hint_huge(s, HP_SEG);
             s->next = g_segments;
             g_segments = s;
             g_seg_cur = s;
@@ -394,6 +440,7 @@ static hp_page *page_acquire(hp_heap *h, uint32_t c) {
     zell__plat_mutex_unlock(&g_mu);
     __atomic_add_fetch(&g_in_use, (int64_t)HP_PAGE, __ATOMIC_RELAXED);
     note_peak();
+    limit_grow();
     page_init(pg, c, h);
     return pg;
 }
@@ -480,8 +527,56 @@ int zell__hp_start(void) {
     return __atomic_load_n(&g_mode, __ATOMIC_ACQUIRE) == 1;
 }
 
+/* "512MiB", "1G", "800000000", "off" (k/m/g and ki/mi/gi are both 1024-based). -1: unparsable. */
+static int64_t parse_limit(const char *e) {
+    if (strcmp(e, "off") == 0 || strcmp(e, "0") == 0) return 0;
+    char *end;
+    long long v = strtoll(e, &end, 10);
+    if (v <= 0 || end == e) return -1;
+    switch (*end) {
+    case 'k': case 'K': v <<= 10; break;
+    case 'm': case 'M': v <<= 20; break;
+    case 'g': case 'G': v <<= 30; break;
+    case 't': case 'T': v <<= 40; break;
+    case 0: break;
+    default: return -1;
+    }
+    return (int64_t)v;
+}
+
+static void limit_init(void) {
+    const char *e = getenv("ZELL_MEMLIMIT");
+    int64_t v = e && *e ? parse_limit(e) : -1;
+    if (v >= 0) {
+        __atomic_store_n(&g_mem_limit, v, __ATOMIC_RELAXED);
+        g_mem_limit_src = "ZELL_MEMLIMIT";
+        return;
+    }
+    const char *src = NULL;
+    __atomic_store_n(&g_mem_limit, zell__plat_mem_limit(&src), __ATOMIC_RELAXED);
+    g_mem_limit_src = src;
+}
+
+int64_t zell__heap_mem_limit(const char **src) {
+    zell__plat_once_run(&g_limit_once, limit_init);
+    if (src) *src = g_mem_limit_src;
+    return __atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED);
+}
+
+int64_t zell_runtime_mem_limit(void) { return zell__heap_mem_limit(NULL); }
+
+int64_t zell_runtime_set_mem_limit(int64_t n) {
+    int64_t old = zell__heap_mem_limit(NULL);
+    __atomic_store_n(&g_mem_limit, n > 0 ? n : 0, __ATOMIC_RELAXED);
+    g_mem_limit_src = "runtime.SetMemLimit";
+    trim(reserve_limit());   /* a lower limit takes effect now */
+    if (n > 0) zell__plat_malloc_trim();
+    return old;
+}
+
 static void mode_init(void) {
     int on = HP_ENABLED;
+    zell__plat_once_run(&g_limit_once, limit_init);
     const char *e = getenv("ZELL_NO_SLAB");
     if (e && *e && *e != '0') on = 0;
     if (on && !zell__plat_tls_new(&g_key, heap_thread_exit)) on = 0;
@@ -744,6 +839,7 @@ static void *alloc_large(int64_t size, int zero) {
     ((hp_big *)base)->len = len;
     __atomic_add_fetch(&g_in_use, (int64_t)len, __ATOMIC_RELAXED);
     note_peak();
+    limit_grow();
     return base + HP_BIG_HDR;
 }
 
@@ -789,6 +885,7 @@ void *zell__hp_alloc_big(int64_t size, int zero) {
     ((hp_big *)base)->kind = BIG_MEDIUM;
     ((hp_big *)base)->len = len;
     __atomic_add_fetch(&g_in_use, (int64_t)len, __ATOMIC_RELAXED);
+    limit_grow();
     return base + HP_BIG_HDR;
 }
 

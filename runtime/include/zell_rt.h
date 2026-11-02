@@ -526,6 +526,13 @@ typedef void (*zell_task_fn)(zell_task *task, void *ctx);
 
 void    zell_sched_post(zell_resume_fn fn, void *arg);  /* run fn(arg) on a worker */
 int64_t zell_sched_workers(void);
+/* runtime.Workers / CPULimit / MemLimit / SetMemLimit (DESIGN.md "Память"):
+ * worker threads (starts the pool), CPUs the process may use, the memory
+ * limit in bytes (0: none), and setting it (0: none; returns the old one). */
+int64_t zell_runtime_workers(void);
+int64_t zell_runtime_cpu_limit(void);
+int64_t zell_runtime_mem_limit(void);
+int64_t zell_runtime_set_mem_limit(int64_t n);
 bool    zell_sched_is_worker(void);
 void    zell_coro_resume(void *frame);   /* llvm.coro.resume for switched-resume frames */
 

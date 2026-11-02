@@ -144,13 +144,17 @@ int64_t zell__plat_cpu_count(void) {
     return n > 0 ? (int64_t)n : 1;
 }
 
-int64_t zell__plat_cpu_limit(void) {
+int64_t zell__plat_cpu_limit(const char **src) {
+    const char *why = "online CPUs";
     int64_t n = zell__plat_cpu_count();
     DWORD_PTR proc = 0, sys = 0;   /* the affinity mask (one processor group) */
     if (GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) && proc) {
         int64_t a = 0;
         for (DWORD_PTR m = proc; m; m &= m - 1) a++;
-        if (a < n) n = a;
+        if (a < n) {
+            n = a;
+            why = "affinity mask";
+        }
     }
     /* A container (a job object) with a hard CPU cap: CpuRate is in
      * hundredths of a percent of the whole machine. */
@@ -159,9 +163,32 @@ int64_t zell__plat_cpu_limit(void) {
         && (rc.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) && (rc.ControlFlags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP)
         && !(rc.ControlFlags & (JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED | JOB_OBJECT_CPU_RATE_CONTROL_MIN_MAX_RATE))) {
         int64_t c = ((int64_t)rc.CpuRate * zell__plat_cpu_count() + 9999) / 10000;
-        if (c > 0 && c < n) n = c;
+        if (c > 0 && c < n) {
+            n = c;
+            why = "job object CPU rate";
+        }
     }
+    if (src) *src = why;
     return n > 0 ? n : 1;
+}
+
+int64_t zell__plat_mem_limit(const char **src) {
+    const char *why = NULL;
+    int64_t m = 0;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+    if (QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation, &li, sizeof li, NULL)) {
+        if ((li.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY) && li.JobMemoryLimit) {
+            m = (int64_t)li.JobMemoryLimit;
+            why = "job object memory limit";
+        }
+        if ((li.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY) && li.ProcessMemoryLimit
+            && (m == 0 || (int64_t)li.ProcessMemoryLimit < m)) {
+            m = (int64_t)li.ProcessMemoryLimit;
+            why = "job object process memory limit";
+        }
+    }
+    if (src) *src = why;
+    return m;
 }
 
 void zell__plat_yield(void) { SwitchToThread(); }

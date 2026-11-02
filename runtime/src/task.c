@@ -876,7 +876,7 @@ int64_t zell__sched_max_threads(void) {
 static int64_t worker_count(void) {
     const char *env = getenv("ZELL_WORKERS");
     long n = env ? strtol(env, NULL, 10) : 0;
-    if (n <= 0) n = zell__plat_cpu_limit();   /* affinity and a container's CPU quota */
+    if (n <= 0) n = zell__plat_cpu_limit(NULL);   /* affinity and a container's CPU quota */
     if (n <= 0) n = 1;
     if (n > 256) n = 256;
     return n;
@@ -916,12 +916,26 @@ void zell__sched_start(void) {
     q_stopping = 0;
     q_nworkers = worker_count();
     q_max_spares = spare_limit(q_nworkers);
-    q_ncpu = zell__plat_cpu_limit();
+    const char *cpu_src = NULL;
+    q_ncpu = zell__plat_cpu_limit(&cpu_src);
     for (int64_t i = 0; i < q_nworkers; i++) spawn_worker_locked(0);
     __atomic_store_n(&q_started, 1, __ATOMIC_RELEASE);
     zell__plat_mutex_unlock(&q_mu);
     timers_start();
+    const char *dbg = getenv("ZELL_LIMITS_DEBUG");
+    if (dbg && *dbg && *dbg != '0') {   /* what the runtime found (ABI.md 10.1) */
+        const char *mem_src = NULL;
+        int64_t mem = zell__heap_mem_limit(&mem_src);
+        const char *wenv = getenv("ZELL_WORKERS");
+        fprintf(stderr, "zell: %lld workers (%s), %lld CPUs usable (%s), memory limit ",
+                (long long)q_nworkers, wenv && atol(wenv) > 0 ? "ZELL_WORKERS" : "CPUs usable", (long long)q_ncpu, cpu_src);
+        if (mem) fprintf(stderr, "%lld MiB (%s)\n", (long long)(mem >> 20), mem_src);
+        else fprintf(stderr, "none\n");
+    }
 }
+
+int64_t zell_runtime_workers(void) { return zell_sched_workers(); }
+int64_t zell_runtime_cpu_limit(void) { return zell__plat_cpu_limit(NULL); }
 
 void zell__sched_stop(void) {
     orphans_clear();   /* the calling thread's (synchronous code) */

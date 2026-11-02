@@ -295,6 +295,35 @@ TEST(heap_release_to_os) {
     assert(zell_diag_rt_heap_released() >= (int64_t)60 << 20);
 }
 
+/* 40 MB of small objects made and freed. */
+static void heap_wave(void) {
+    enum { N = 40 << 20 >> 6 };
+    void **v = malloc(N * sizeof *v);
+    for (int i = 0; i < N; i++) v[i] = zell_object_new(&plain, 64);
+    for (int i = 0; i < N; i++) zell_release(v[i]);
+    free(v);
+}
+
+TEST(heap_mem_limit) {
+    int64_t old = zell_runtime_set_mem_limit(0);
+    heap_wave();
+    if (zell_diag_rt_heap_retained() == 0 && zell_diag_rt_heap_in_use() == 0) {   /* the heap is off */
+        zell_runtime_set_mem_limit(old);
+        return;
+    }
+    /* no limit: the reserve keeps up to the recent peak */
+    assert(zell_diag_rt_heap_retained() >= (int64_t)30 << 20);
+    /* a 24 MB limit (target 22.5 MB): the reserve shrinks at once... */
+    const int64_t lim = (int64_t)24 << 20, slack = (int64_t)1 << 20;
+    assert(zell_runtime_set_mem_limit(lim) == 0 && zell_runtime_mem_limit() == lim);
+    assert(zell_diag_rt_heap_retained() <= lim - lim / 16 + slack);
+    /* ...and a wave past the limit leaves no more than the target behind */
+    heap_wave();
+    assert(zell_diag_rt_heap_retained() <= lim - lim / 16 + slack);
+    zell_runtime_set_mem_limit(old);
+    zell_runtime_free_os_memory();
+}
+
 /* ---- biased reference counting (rc.c) ---- */
 
 void zell__rc_thread_eligible(void);   /* runtime-internal (rt_internal.h) */
@@ -514,5 +543,6 @@ int main(void) {
     RUN(brc_owner_exit);
     RUN(brc_weak);
     RUN(coro_frame_cache);
+    RUN(heap_mem_limit);
     return 0;
 }

@@ -60,8 +60,14 @@ ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_count(void);
 /* The CPUs this process may use (at least 1, at most the online ones): the
  * affinity mask (taskset, a cpuset) and a CPU quota rounded up (Linux
  * cgroup v2 cpu.max on the way to the root, else v1 cfs_quota/period;
- * Windows: a hard-capped job object's CPU rate). The default worker count. */
-ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_limit(void);
+ * Windows: a hard-capped job object's CPU rate). The default worker count.
+ * *src (may be NULL) names where the number came from. */
+ZELL_PLAT_HIDDEN int64_t zell__plat_cpu_limit(const char **src);
+/* The memory this process may use in bytes, 0 when unlimited: Linux the
+ * smallest cgroup v2 memory.max / memory.high of the group and its
+ * ancestors, else cgroup v1 memory.limit_in_bytes; Windows the job
+ * object's job or process memory limit. *src (may be NULL) names the source. */
+ZELL_PLAT_HIDDEN int64_t zell__plat_mem_limit(const char **src);
 /* Gives up the CPU (spin-lock back-off). */
 ZELL_PLAT_HIDDEN void zell__plat_yield(void);
 /* A spin-wait hint to the CPU (x86 `pause`, arm64 `yield`): no system

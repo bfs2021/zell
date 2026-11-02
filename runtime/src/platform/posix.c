@@ -93,63 +93,114 @@ static int64_t quota_cpus(long long quota, long long period) {
     return (int64_t)((quota + period - 1) / period);
 }
 
-/* The smallest CPU quota on the way from the process's cgroup to the root:
- * cgroup v2 cpu.max ("max" or "<quota> <period>") of every ancestor, else
- * cgroup v1 cpu.cfs_quota_us / cpu.cfs_period_us of the cpu controller's
- * group. 0: no quota. */
-static int64_t cgroup_cpu_quota(void) {
-    char cg[4096], path[4352], buf[128];
+static int64_t parse_cpu_max(const char *s) {   /* "max 100000" or "<quota> <period>" */
+    long long q, per;
+    return sscanf(s, "%lld %lld", &q, &per) == 2 ? quota_cpus(q, per) : 0;
+}
+
+static int64_t parse_bytes(const char *s) {     /* "max" or a byte count */
+    long long v;
+    return sscanf(s, "%lld", &v) == 1 && v > 0 ? (int64_t)v : 0;
+}
+
+/* The smallest positive value `parse` reads from cgroup v2 file `name` of
+ * the process's group and of every ancestor (a limit set higher up applies
+ * too); 0 when there is none or no cgroup v2 hierarchy. */
+static int64_t cgroup_v2_min(const char *name, int64_t (*parse)(const char *)) {
+    char cg[4096], cur[4096], path[4352], buf[128];
     if (read_small("/proc/self/cgroup", cg, sizeof cg) <= 0) return 0;
+    char *v2 = strstr(cg, "0::");   /* the line "0::/path" */
+    if (!v2 || (v2 != cg && v2[-1] != '\n')) return 0;
+    size_t len = strcspn(v2 + 3, "\n");
+    if (len >= sizeof cur) len = sizeof cur - 1;
+    memcpy(cur, v2 + 3, len);
+    cur[len] = 0;
     int64_t best = 0;
-    /* v2: the line "0::/path" */
-    char *v2 = strstr(cg, "0::");
-    if (v2 && (v2 == cg || v2[-1] == '\n')) {
-        char cur[4096];
-        size_t len = strcspn(v2 + 3, "\n");
-        if (len >= sizeof cur) len = sizeof cur - 1;
-        memcpy(cur, v2 + 3, len);
-        cur[len] = 0;
-        for (;;) {   /* this group, then each parent up to the root */
-            snprintf(path, sizeof path, "/sys/fs/cgroup%s/cpu.max", strcmp(cur, "/") == 0 ? "" : cur);
-            long long q, per;
-            if (read_small(path, buf, sizeof buf) > 0 && sscanf(buf, "%lld %lld", &q, &per) == 2) {
-                int64_t c = quota_cpus(q, per);
-                if (c > 0 && (best == 0 || c < best)) best = c;
-            }
-            char *slash = strrchr(cur, '/');
-            if (!slash || strcmp(cur, "/") == 0) break;
-            if (slash == cur) cur[1] = 0;
-            else *slash = 0;
+    for (;;) {   /* this group, then each parent up to the root */
+        snprintf(path, sizeof path, "/sys/fs/cgroup%s/%s", strcmp(cur, "/") == 0 ? "" : cur, name);
+        if (read_small(path, buf, sizeof buf) > 0) {
+            int64_t v = parse(buf);
+            if (v > 0 && (best == 0 || v < best)) best = v;
         }
-        if (best) return best;
+        char *slash = strrchr(cur, '/');
+        if (!slash || strcmp(cur, "/") == 0) break;
+        if (slash == cur) cur[1] = 0;
+        else *slash = 0;
     }
-    /* v1: the cpu controller, at the usual mount points (inside a container
-     * its group is the mount's root) */
-    static const char *const mounts[] = { "/sys/fs/cgroup/cpu,cpuacct", "/sys/fs/cgroup/cpu" };
+    return best;
+}
+
+/* A cgroup v1 controller file at the usual mount points (inside a container
+ * the process's group is the mount's root). */
+static bool cgroup_v1_read(const char *mount, const char *file, long long *out) {
+    char path[256], buf[64];
+    snprintf(path, sizeof path, "/sys/fs/cgroup/%s/%s", mount, file);
+    return read_small(path, buf, sizeof buf) > 0 && sscanf(buf, "%lld", out) == 1;
+}
+
+static int64_t cgroup_cpu_quota(const char **src) {
+    int64_t q = cgroup_v2_min("cpu.max", parse_cpu_max);
+    if (q) {
+        *src = "cgroup cpu.max";
+        return q;
+    }
+    static const char *const mounts[] = { "cpu,cpuacct", "cpu" };
     for (size_t i = 0; i < sizeof mounts / sizeof mounts[0]; i++) {
-        long long q = 0, per = 0;
-        snprintf(path, sizeof path, "%s/cpu.cfs_quota_us", mounts[i]);
-        if (read_small(path, buf, sizeof buf) <= 0 || sscanf(buf, "%lld", &q) != 1) continue;
-        snprintf(path, sizeof path, "%s/cpu.cfs_period_us", mounts[i]);
-        if (read_small(path, buf, sizeof buf) <= 0 || sscanf(buf, "%lld", &per) != 1) continue;
-        return quota_cpus(q, per);
+        long long quota, per;
+        if (cgroup_v1_read(mounts[i], "cpu.cfs_quota_us", &quota) && cgroup_v1_read(mounts[i], "cpu.cfs_period_us", &per)) {
+            *src = "cgroup v1 cpu.cfs_quota_us";
+            return quota_cpus(quota, per);
+        }
     }
     return 0;
 }
 #endif
 
-int64_t zell__plat_cpu_limit(void) {
+int64_t zell__plat_cpu_limit(const char **src) {
+    const char *why = "online CPUs";
     int64_t n = zell__plat_cpu_count();
 #if defined(__linux__)
     cpu_set_t set;
     if (sched_getaffinity(0, sizeof set, &set) == 0) {   /* taskset, cpuset */
         int a = CPU_COUNT(&set);
-        if (a > 0 && a < n) n = a;
+        if (a > 0 && a < n) {
+            n = a;
+            why = "affinity mask";
+        }
     }
-    int64_t q = cgroup_cpu_quota();
-    if (q > 0 && q < n) n = q;
+    const char *qs = NULL;
+    int64_t q = cgroup_cpu_quota(&qs);
+    if (q > 0 && q < n) {
+        n = q;
+        why = qs;
+    }
 #endif
+    if (src) *src = why;
     return n > 0 ? n : 1;
+}
+
+int64_t zell__plat_mem_limit(const char **src) {
+    const char *why = NULL;
+    int64_t m = 0;
+#if defined(__linux__)
+    int64_t max = cgroup_v2_min("memory.max", parse_bytes), high = cgroup_v2_min("memory.high", parse_bytes);
+    if (high && (!max || high < max)) {
+        m = high;
+        why = "cgroup memory.high";
+    } else if (max) {
+        m = max;
+        why = "cgroup memory.max";
+    } else {
+        long long v;   /* v1: "no limit" is a huge number, near LONG_MAX */
+        long long phys = (long long)sysconf(_SC_PHYS_PAGES) * (long long)sysconf(_SC_PAGESIZE);
+        if (cgroup_v1_read("memory", "memory.limit_in_bytes", &v) && v > 0 && (phys <= 0 || v < phys)) {
+            m = (int64_t)v;
+            why = "cgroup v1 memory.limit_in_bytes";
+        }
+    }
+#endif
+    if (src) *src = why;
+    return m;
 }
 
 void zell__plat_yield(void) { sched_yield(); }

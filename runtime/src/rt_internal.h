@@ -149,6 +149,8 @@ ZELL_HIDDEN zell_object *zell__object_new_uninit(const zell_type_info *type, int
 #define ZELL__HP_CLASSES 36
 #define ZELL__HP_SMALL_MAX 16384
 ZELL_HIDDEN void zell__heap_collect(int force);
+/* The memory limit in bytes (0: none) and where it came from (heap.c). */
+ZELL_HIDDEN int64_t zell__heap_mem_limit(const char **src);
 /* Biased reference counting (rc.c, ABI.md 3.1). thread_enable gives the
  * calling thread an owner slot (workers, the main thread); retain/release
  * of biased and of unowned words while threaded (mem.c dispatches); count:

@@ -339,7 +339,12 @@ objects, so `zell_threaded` stays 0) gives back, every 0.2 s, what stayed
 unused for 0.3 s beyond the minimum: free pages with
 `zell__plat_mem_release` (Linux `MADV_DONTNEED`, macOS `MADV_FREE`,
 Windows `DiscardVirtualMemory` / `MEM_RESET`; the address range stays
-reserved) and cached mappings with `munmap`. `zell_runtime_free_os_memory`
+reserved) and cached mappings with `munmap`. Under a **memory limit**
+(`zell_runtime_mem_limit`, DESIGN.md "Память") the reserve never holds
+more than 15/16 of the limit minus the heap in use: checked when memory is
+freed and, for growth, each time the heap in use grew by 1 MB; the
+scavenger then also calls `malloc_trim`, and segments get no huge-page
+hint once the heap passes half the target. `zell_runtime_free_os_memory`
 releases everything at once. `diag.Runtime()` reports `HeapInUse`
 (owned pages, medium and large objects), `HeapRetained` (the reserve) and
 `HeapReleased` (pages given back whose address range is kept). The heap is
@@ -2410,6 +2415,8 @@ output still sitting in buffers may be lost if workers are still printing.
 | `ZELL_DIAG_HEAP=1` | per-type live object counters for `diag.HeapByType` / `/debug/heap` in any build (18) |
 | `ZELL_NO_SLAB=1` | objects come straight from `malloc` instead of the object heap (3.2), e.g. so Valgrind memcheck sees each object |
 | `ZELL_HEAP_RESERVE=n[K\|M\|G]` | free heap memory the scavenger leaves to the process (3.2; default 16M) |
+| `ZELL_MEMLIMIT=n[K\|M\|G\|T][iB]` / `off` | memory limit (3.2): overrides the container's (cgroup v2 `memory.max`/`memory.high`, v1 `memory.limit_in_bytes`, a Windows job object's); the heap keeps no reserve past 15/16 of it |
+| `ZELL_LIMITS_DEBUG=1` | print the worker count, the usable CPUs and the memory limit with their sources when the scheduler starts |
 | `ZELL_NO_BIAS=1` | no thread owns objects: every refcount stays unowned (3.1), e.g. to compare |
 | `ZELL_RC_STATS=1` | at shutdown, print to stderr how many objects were biased, queued for a merge and merged by another thread (3.1) |
 | `ZELL_TEST_PANICS=process` | `testing.Panics` re-runs the test in a child process instead of catching the panic in-process (8) |
