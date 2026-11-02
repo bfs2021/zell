@@ -1,0 +1,18 @@
+# The Rust services of the TechEmpower-style benchmark (../README.md): the
+# same routes on actix-web and on axum (Tokio + hyper), sharing the database
+# code in common/. A workspace of its own, outside the compiler's.
+[workspace]
+resolver = "2"
+members = ["common", "actix", "axum"]
+
+[workspace.dependencies]
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+
+[profile.release]
+lto = true
+codegen-units = 1

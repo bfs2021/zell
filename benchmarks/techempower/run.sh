@@ -3,11 +3,12 @@
 # APPS="zell go dotnet", TESTS="db fortunes ...", C (connections, 256), D (seconds, 15).
 # The test "pipelined" is /plaintext with 16 requests per write (pipeline.lua),
 # like TechEmpower's plaintext test.
-# Binaries: /root/te-zell, /root/te-go, /root/te-dotnet-out/te-dotnet (see README.md).
+# Binaries: /root/te-zell, /root/te-go, /root/te-dotnet-out/te-dotnet, /root/te-actix,
+# /root/te-axum (see README.md).
 R=${1:-3}; C=${C:-256}; D=${D:-15}
 DIR=$(cd "$(dirname "$0")" && pwd)
 OUT=/root/results/te-$(date +%Y%m%d-%H%M); mkdir -p $OUT; echo $OUT
-declare -A APP=([zell]=/root/te-zell [go]=/root/te-go [dotnet]=/root/te-dotnet-out/te-dotnet)
+declare -A APP=([zell]=/root/te-zell [go]=/root/te-go [dotnet]=/root/te-dotnet-out/te-dotnet [actix]=/root/te-actix [axum]=/root/te-axum)
 APPS=${APPS:-zell go dotnet}
 TESTS=${TESTS:-"plaintext pipelined json db queries?queries=20 fortunes updates?queries=20 cached-queries?count=20"}
 for r in $(seq $R); do
