@@ -9,7 +9,19 @@
  * Renes-Costello-Batina 2016 (algorithm 4, a = -3), which has no special
  * cases (doubling and the point at infinity included), so the 4-bit
  * fixed-window scalar multiplication with a constant-time table scan does
- * not branch on secret data. Verification uses the same code. */
+ * not branch on secret data.
+ *
+ * Field arithmetic modulo p has its own multiplication, squaring and
+ * reduction (p = 2^256 - 2^224 + 2^192 + 2^96 - 1: -p^-1 mod 2^64 = 1 and
+ * the third limb is zero) and inverts with a fixed addition chain; the
+ * group order uses the generic CIOS code and a 4-bit window for inverses.
+ *
+ * Verification handles only public data, so it is not constant time: u1*G
+ * adds the signed radix-16 digits of u1 from the P256_BASE table with
+ * mixed Jacobian additions (no doublings), u2*Q runs a width-5 wNAF over
+ * Jacobian coordinates (dbl-2001-b, add-2007-bl, a = -3), and the result
+ * is compared with r projectively (X == r Z^2, also r + n) instead of being
+ * converted to affine. */
 #include "crypto.h"
 
 #include <string.h>
@@ -124,16 +136,154 @@ static void mont_from(const mont *c, limb4 r, const limb4 a) {
     mont_mul(c, r, a, one);
 }
 
-/* r = a^(m-2) (inverse for prime m); the exponent is public. */
-static void mont_inv(const mont *c, limb4 r, const limb4 a) {
-    limb4 e, two = { 2, 0, 0, 0 }, acc;
+/* ---- arithmetic modulo p ---- */
+
+/* r = t * R^-1 mod p for a 512-bit t < p * R (t is clobbered). Round i
+ * adds m * p * 2^(64 i) with m = t[i] (-p^-1 = 1 mod 2^64), which clears
+ * word i; the limbs of p are 2^64 - 1, 2^32 - 1, 0 and 2^64 - 2^32 + 1, so
+ * the products are shifts: m (2^64 - 1) + m = m 2^64, m (2^32 - 1) + m =
+ * m 2^32 (words i + 1, i + 2), m (2^64 - 2^32 + 1) = m 2^64 - m 2^32 + m
+ * (words i + 3, i + 4). The carry out of word i + 4 is kept for the next
+ * round (CIOS); the last one is the 2^256 bit of a result below 2p. */
+static void fp_reduce(limb4 r, uint64_t t[8]) {
+    uint64_t c = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t m = t[i];
+        u128 x = (u128)t[i + 1] + ((u128)m << 32);
+        t[i + 1] = (uint64_t)x;
+        x = (u128)t[i + 2] + (uint64_t)(x >> 64);
+        t[i + 2] = (uint64_t)x;
+        u128 mp3 = ((u128)m << 64) - ((u128)m << 32) + m;
+        x = (u128)t[i + 3] + (uint64_t)mp3 + (uint64_t)(x >> 64);
+        t[i + 3] = (uint64_t)x;
+        x = (u128)t[i + 4] + (uint64_t)(mp3 >> 64) + (uint64_t)(x >> 64) + c;
+        t[i + 4] = (uint64_t)x;
+        c = (uint64_t)(x >> 64);
+    }
+    limb4 res = { t[4], t[5], t[6], t[7] }, d;
+    uint64_t borrow = l4_sub(d, res, P_M);
+    l4_cmov(res, d, 0 - (c | (borrow ^ 1)));
+    l4_copy(r, res);
+}
+
+/* r = a * b * R^-1 mod p for a, b < p: CIOS in registers, each row adding
+ * a * b[i] and then m * p (m = the low word, shifts as in fp_reduce) while
+ * dropping the cleared low word. */
+static void fp_mul(limb4 r, const limb4 a, const limb4 b) {
+    uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t bi = b[i];
+        u128 x = (u128)a[0] * bi + t0;
+        t0 = (uint64_t)x;
+        x = (u128)a[1] * bi + t1 + (uint64_t)(x >> 64);
+        t1 = (uint64_t)x;
+        x = (u128)a[2] * bi + t2 + (uint64_t)(x >> 64);
+        t2 = (uint64_t)x;
+        x = (u128)a[3] * bi + t3 + (uint64_t)(x >> 64);
+        t3 = (uint64_t)x;
+        x = (u128)t4 + (uint64_t)(x >> 64);
+        t4 = (uint64_t)x;
+        uint64_t t5 = (uint64_t)(x >> 64);
+        uint64_t m = t0;
+        x = (u128)t1 + ((u128)m << 32);
+        t0 = (uint64_t)x;
+        x = (u128)t2 + (uint64_t)(x >> 64);
+        t1 = (uint64_t)x;
+        u128 mp3 = ((u128)m << 64) - ((u128)m << 32) + m;
+        x = (u128)t3 + (uint64_t)mp3 + (uint64_t)(x >> 64);
+        t2 = (uint64_t)x;
+        x = (u128)t4 + (uint64_t)(mp3 >> 64) + (uint64_t)(x >> 64);
+        t3 = (uint64_t)x;
+        t4 = t5 + (uint64_t)(x >> 64);
+    }
+    limb4 res = { t0, t1, t2, t3 }, d;
+    uint64_t borrow = l4_sub(d, res, P_M);
+    l4_cmov(res, d, 0 - (t4 | (borrow ^ 1)));
+    l4_copy(r, res);
+}
+
+/* r = a^2 * R^-1 mod p: the six cross products once, doubled, plus the
+ * squares of the limbs. */
+static void fp_sqr(limb4 r, const limb4 a) {
+    uint64_t t[8] = { 0 };
+    for (int i = 0; i < 3; i++) {
+        uint64_t carry = 0;
+        for (int j = i + 1; j < 4; j++) {
+            u128 x = (u128)a[i] * a[j] + t[i + j] + carry;
+            t[i + j] = (uint64_t)x;
+            carry = (uint64_t)(x >> 64);
+        }
+        t[i + 4] = carry;
+    }
+    for (int k = 7; k > 0; k--) t[k] = (t[k] << 1) | (t[k - 1] >> 63);
+    t[0] <<= 1;
+    uint64_t carry = 0;
+    for (int i = 0; i < 4; i++) {
+        u128 sq = (u128)a[i] * a[i];
+        u128 x = (u128)t[2 * i] + (uint64_t)sq + carry;
+        t[2 * i] = (uint64_t)x;
+        x = (u128)t[2 * i + 1] + (uint64_t)(sq >> 64) + (uint64_t)(x >> 64);
+        t[2 * i + 1] = (uint64_t)x;
+        carry = (uint64_t)(x >> 64);
+    }
+    fp_reduce(r, t);
+}
+
+static void fp_sqr_n(limb4 r, const limb4 a, int n) {
+    fp_sqr(r, a);
+    for (int i = 1; i < n; i++) fp_sqr(r, r);
+}
+
+/* r = a^(p-2) = a^-1 mod p (Montgomery form in and out). p - 2 is, from
+ * the top: 32 ones, 31 zeros, a one, 96 zeros, 94 ones, a zero, a one;
+ * x_k = a^(2^k - 1) builds the runs: 255 squarings, 12 multiplications. */
+static void fp_inv(limb4 r, const limb4 a) {
+    limb4 x2, x4, x8, x16, x32, t;
+    fp_sqr(t, a);
+    fp_mul(x2, t, a);
+    fp_sqr_n(t, x2, 2);
+    fp_mul(x4, t, x2);
+    fp_sqr_n(t, x4, 4);
+    fp_mul(x8, t, x4);
+    fp_sqr_n(t, x8, 8);
+    fp_mul(x16, t, x8);
+    fp_sqr_n(t, x16, 16);
+    fp_mul(x32, t, x16);
+    fp_sqr_n(t, x32, 32);
+    fp_mul(t, t, a);
+    fp_sqr_n(t, t, 128);
+    fp_mul(t, t, x32);
+    fp_sqr_n(t, t, 32);
+    fp_mul(t, t, x32);
+    fp_sqr_n(t, t, 16);
+    fp_mul(t, t, x16);
+    fp_sqr_n(t, t, 8);
+    fp_mul(t, t, x8);
+    fp_sqr_n(t, t, 4);
+    fp_mul(t, t, x4);
+    fp_sqr_n(t, t, 2);
+    fp_mul(t, t, x2);
+    fp_sqr_n(t, t, 2);
+    fp_mul(r, t, a);
+}
+
+/* r = a^(m-2) for the generic modulus (the group order): a fixed 4-bit
+ * window over the public exponent, 256 squarings and 64 + 14
+ * multiplications, the same sequence for every a. */
+static void mont_inv_win(const mont *c, limb4 r, const limb4 a) {
+    limb4 e, two = { 2, 0, 0, 0 }, tab[16], acc;
     l4_sub(e, c->m, two);
+    l4_copy(tab[0], c->one);
+    l4_copy(tab[1], a);
+    for (int i = 2; i < 16; i++) mont_mul(c, tab[i], tab[i - 1], a);
     l4_copy(acc, c->one);
-    for (int i = 255; i >= 0; i--) {
-        mont_mul(c, acc, acc, acc);
-        if ((e[i / 64] >> (i % 64)) & 1) mont_mul(c, acc, acc, a);
+    for (int w = 63; w >= 0; w--) {
+        for (int k = 0; k < 4; k++) mont_mul(c, acc, acc, acc);
+        unsigned d = (unsigned)(e[w / 16] >> (4 * (w % 16))) & 15;
+        mont_mul(c, acc, acc, tab[d]);
     }
     l4_copy(r, acc);
+    zell__crypto_wipe(tab, sizeof tab);
 }
 
 /* ---- curve ---- */
@@ -154,31 +304,31 @@ typedef struct {
 static void pt_add(const curve *k, pt *r, const pt *p, const pt *q) {
     const mont *f = &k->fp;
     limb4 t0, t1, t2, t3, t4, X3, Y3, Z3;
-    mont_mul(f, t0, p->X, q->X);
-    mont_mul(f, t1, p->Y, q->Y);
-    mont_mul(f, t2, p->Z, q->Z);
+    fp_mul(t0, p->X, q->X);
+    fp_mul(t1, p->Y, q->Y);
+    fp_mul(t2, p->Z, q->Z);
     mont_add(f, t3, p->X, p->Y);
     mont_add(f, t4, q->X, q->Y);
-    mont_mul(f, t3, t3, t4);
+    fp_mul(t3, t3, t4);
     mont_add(f, t4, t0, t1);
     mont_sub(f, t3, t3, t4);
     mont_add(f, t4, p->Y, p->Z);
     mont_add(f, X3, q->Y, q->Z);
-    mont_mul(f, t4, t4, X3);
+    fp_mul(t4, t4, X3);
     mont_add(f, X3, t1, t2);
     mont_sub(f, t4, t4, X3);
     mont_add(f, X3, p->X, p->Z);
     mont_add(f, Y3, q->X, q->Z);
-    mont_mul(f, X3, X3, Y3);
+    fp_mul(X3, X3, Y3);
     mont_add(f, Y3, t0, t2);
     mont_sub(f, Y3, X3, Y3);
-    mont_mul(f, Z3, k->b, t2);
+    fp_mul(Z3, k->b, t2);
     mont_sub(f, X3, Y3, Z3);
     mont_add(f, Z3, X3, X3);
     mont_add(f, X3, X3, Z3);
     mont_sub(f, Z3, t1, X3);
     mont_add(f, X3, t1, X3);
-    mont_mul(f, Y3, k->b, Y3);
+    fp_mul(Y3, k->b, Y3);
     mont_add(f, t1, t2, t2);
     mont_add(f, t2, t1, t2);
     mont_sub(f, Y3, Y3, t2);
@@ -188,14 +338,14 @@ static void pt_add(const curve *k, pt *r, const pt *p, const pt *q) {
     mont_add(f, t1, t0, t0);
     mont_add(f, t0, t1, t0);
     mont_sub(f, t0, t0, t2);
-    mont_mul(f, t1, t4, Y3);
-    mont_mul(f, t2, t0, Y3);
-    mont_mul(f, Y3, X3, Z3);
+    fp_mul(t1, t4, Y3);
+    fp_mul(t2, t0, Y3);
+    fp_mul(Y3, X3, Z3);
     mont_add(f, Y3, Y3, t2);
-    mont_mul(f, X3, t3, X3);
+    fp_mul(X3, t3, X3);
     mont_sub(f, X3, X3, t1);
-    mont_mul(f, Z3, t4, Z3);
-    mont_mul(f, t1, t3, t0);
+    fp_mul(Z3, t4, Z3);
+    fp_mul(t1, t3, t0);
     mont_add(f, Z3, Z3, t1);
     l4_copy(r->X, X3);
     l4_copy(r->Y, Y3);
@@ -206,24 +356,24 @@ static void pt_add(const curve *k, pt *r, const pt *p, const pt *q) {
 static void pt_dbl(const curve *k, pt *r, const pt *p) {
     const mont *f = &k->fp;
     limb4 t0, t1, t2, t3, X3, Y3, Z3;
-    mont_mul(f, t0, p->X, p->X);
-    mont_mul(f, t1, p->Y, p->Y);
-    mont_mul(f, t2, p->Z, p->Z);
-    mont_mul(f, t3, p->X, p->Y);
+    fp_sqr(t0, p->X);
+    fp_sqr(t1, p->Y);
+    fp_sqr(t2, p->Z);
+    fp_mul(t3, p->X, p->Y);
     mont_add(f, t3, t3, t3);
-    mont_mul(f, Z3, p->X, p->Z);
+    fp_mul(Z3, p->X, p->Z);
     mont_add(f, Z3, Z3, Z3);
-    mont_mul(f, Y3, k->b, t2);
+    fp_mul(Y3, k->b, t2);
     mont_sub(f, Y3, Y3, Z3);
     mont_add(f, X3, Y3, Y3);
     mont_add(f, Y3, X3, Y3);
     mont_sub(f, X3, t1, Y3);
     mont_add(f, Y3, t1, Y3);
-    mont_mul(f, Y3, X3, Y3);
-    mont_mul(f, X3, X3, t3);
+    fp_mul(Y3, X3, Y3);
+    fp_mul(X3, X3, t3);
     mont_add(f, t3, t2, t2);
     mont_add(f, t2, t2, t3);
-    mont_mul(f, Z3, k->b, Z3);
+    fp_mul(Z3, k->b, Z3);
     mont_sub(f, Z3, Z3, t2);
     mont_sub(f, Z3, Z3, t0);
     mont_add(f, t3, Z3, Z3);
@@ -231,13 +381,13 @@ static void pt_dbl(const curve *k, pt *r, const pt *p) {
     mont_add(f, t3, t0, t0);
     mont_add(f, t0, t3, t0);
     mont_sub(f, t0, t0, t2);
-    mont_mul(f, t0, t0, Z3);
+    fp_mul(t0, t0, Z3);
     mont_add(f, Y3, Y3, t0);
-    mont_mul(f, t0, p->Y, p->Z);
+    fp_mul(t0, p->Y, p->Z);
     mont_add(f, t0, t0, t0);
-    mont_mul(f, Z3, t0, Z3);
+    fp_mul(Z3, t0, Z3);
     mont_sub(f, X3, X3, Z3);
-    mont_mul(f, Z3, t0, t1);
+    fp_mul(Z3, t0, t1);
     mont_add(f, Z3, Z3, Z3);
     mont_add(f, Z3, Z3, Z3);
     l4_copy(r->X, X3);
@@ -328,12 +478,12 @@ static void pt_mul_base(const curve *k, pt *r, const uint8_t s[32]) {
 static bool pt_affine(const curve *k, const pt *p, uint8_t x[32], uint8_t y[32]) {
     limb4 zi, t;
     if (l4_is_zero(p->Z)) return false;
-    mont_inv(&k->fp, zi, p->Z);
-    mont_mul(&k->fp, t, p->X, zi);
+    fp_inv(zi, p->Z);
+    fp_mul(t, p->X, zi);
     mont_from(&k->fp, t, t);
     l4_to_be(x, t);
     if (y) {
-        mont_mul(&k->fp, t, p->Y, zi);
+        fp_mul(t, p->Y, zi);
         mont_from(&k->fp, t, t);
         l4_to_be(y, t);
     }
@@ -353,9 +503,9 @@ static bool pt_decode(const curve *k, pt *r, const uint8_t in[65]) {
     l4_copy(r->Z, f->one);
     /* y^2 == x^3 - 3x + b */
     limb4 lhs, rhs, t;
-    mont_mul(f, lhs, r->Y, r->Y);
-    mont_mul(f, rhs, r->X, r->X);
-    mont_mul(f, rhs, rhs, r->X);
+    fp_mul(lhs, r->Y, r->Y);
+    fp_mul(rhs, r->X, r->X);
+    fp_mul(rhs, rhs, r->X);
     mont_add(f, t, r->X, r->X);
     mont_add(f, t, t, r->X);
     mont_sub(f, rhs, rhs, t);
@@ -457,7 +607,7 @@ bool zell__p256_sign(uint8_t sig[64], const uint8_t priv[32], const uint8_t *dig
                     /* s = k^-1 (e + r d) mod n, all in Montgomery form */
                     l4_from_be(kk, V);
                     mont_to(fn, kk, kk);
-                    mont_inv(fn, ki, kk);
+                    mont_inv_win(fn, ki, kk);
                     limb4 rm, dm, em;
                     mont_to(fn, rm, r);
                     mont_to(fn, dm, d);
@@ -488,6 +638,214 @@ bool zell__p256_sign(uint8_t sig[64], const uint8_t priv[32], const uint8_t *dig
     return ok;
 }
 
+/* ---- verification (public data, variable time) ---- */
+
+/* Jacobian (X, Y, Z): x = X/Z^2, y = Y/Z^3; Z == 0 is the point at infinity. */
+typedef pt jpt;
+
+static bool fp_is_zero(const limb4 a) { return l4_is_zero(a) == 1; }
+
+/* dbl-2001-b (a = -3): 3M + 5S. */
+static void jdbl(jpt *r, const jpt *p) {
+    if (fp_is_zero(p->Z)) {
+        *r = *p;
+        return;
+    }
+    limb4 delta, gamma, beta, alpha, t0, t1, X3, Y3, Z3;
+    fp_sqr(delta, p->Z);
+    fp_sqr(gamma, p->Y);
+    fp_mul(beta, p->X, gamma);
+    mont_sub(&P256.fp, t0, p->X, delta);
+    mont_add(&P256.fp, t1, p->X, delta);
+    fp_mul(alpha, t0, t1);
+    mont_add(&P256.fp, t0, alpha, alpha);
+    mont_add(&P256.fp, alpha, t0, alpha);
+    fp_sqr(X3, alpha);
+    mont_add(&P256.fp, t0, beta, beta);
+    mont_add(&P256.fp, t0, t0, t0);
+    mont_add(&P256.fp, t1, t0, t0);
+    mont_sub(&P256.fp, X3, X3, t1);
+    mont_add(&P256.fp, t1, p->Y, p->Z);
+    fp_sqr(Z3, t1);
+    mont_sub(&P256.fp, Z3, Z3, gamma);
+    mont_sub(&P256.fp, Z3, Z3, delta);
+    mont_sub(&P256.fp, t0, t0, X3);
+    fp_mul(Y3, alpha, t0);
+    fp_sqr(t1, gamma);
+    mont_add(&P256.fp, t1, t1, t1);
+    mont_add(&P256.fp, t1, t1, t1);
+    mont_add(&P256.fp, t1, t1, t1);
+    mont_sub(&P256.fp, Y3, Y3, t1);
+    l4_copy(r->X, X3);
+    l4_copy(r->Y, Y3);
+    l4_copy(r->Z, Z3);
+}
+
+/* add-2007-bl, or madd-2007-bl when q is affine (qz1: q->Z is one). */
+static void jadd(jpt *r, const jpt *p, const jpt *q, bool qz1) {
+    const mont *f = &P256.fp;
+    if (fp_is_zero(p->Z)) {
+        *r = *q;
+        return;
+    }
+    if (fp_is_zero(q->Z)) {
+        *r = *p;
+        return;
+    }
+    limb4 z1z1, z2z2, u1, u2, s1, s2, h, rr, t;
+    fp_sqr(z1z1, p->Z);
+    fp_mul(u2, q->X, z1z1);
+    fp_mul(t, p->Z, z1z1);
+    fp_mul(s2, q->Y, t);
+    if (qz1) {
+        l4_copy(u1, p->X);
+        l4_copy(s1, p->Y);
+    } else {
+        fp_sqr(z2z2, q->Z);
+        fp_mul(u1, p->X, z2z2);
+        fp_mul(t, q->Z, z2z2);
+        fp_mul(s1, p->Y, t);
+    }
+    mont_sub(f, h, u2, u1);
+    mont_sub(f, rr, s2, s1);
+    if (fp_is_zero(h)) {
+        if (fp_is_zero(rr)) {
+            jdbl(r, p);
+        } else {
+            memset(r, 0, sizeof *r);
+            l4_copy(r->X, f->one);
+            l4_copy(r->Y, f->one);
+        }
+        return;
+    }
+    mont_add(f, rr, rr, rr);
+    limb4 i, j, v, X3, Y3, Z3;
+    mont_add(f, t, h, h);
+    fp_sqr(i, t);
+    fp_mul(j, h, i);
+    fp_mul(v, u1, i);
+    fp_sqr(X3, rr);
+    mont_sub(f, X3, X3, j);
+    mont_sub(f, X3, X3, v);
+    mont_sub(f, X3, X3, v);
+    mont_sub(f, t, v, X3);
+    fp_mul(Y3, rr, t);
+    fp_mul(t, s1, j);
+    mont_add(f, t, t, t);
+    mont_sub(f, Y3, Y3, t);
+    if (qz1) {
+        mont_add(f, t, p->Z, h);
+        fp_sqr(Z3, t);
+        mont_sub(f, Z3, Z3, z1z1);
+        fp_sqr(t, h);
+        mont_sub(f, Z3, Z3, t);
+    } else {
+        mont_add(f, t, p->Z, q->Z);
+        fp_sqr(Z3, t);
+        mont_sub(f, Z3, Z3, z1z1);
+        mont_sub(f, Z3, Z3, z2z2);
+        fp_mul(Z3, Z3, h);
+    }
+    l4_copy(r->X, X3);
+    l4_copy(r->Y, Y3);
+    l4_copy(r->Z, Z3);
+}
+
+static void jneg(jpt *r, const jpt *p) {
+    limb4 zero = { 0, 0, 0, 0 };
+    *r = *p;
+    mont_sub(&P256.fp, r->Y, zero, p->Y);
+}
+
+/* Width-5 NAF of a 256-bit scalar (little-endian limbs): digits odd in
+ * [-15, 15] or zero, at most one nonzero in any 5 consecutive; returns the
+ * number of digits (<= 257). */
+static int wnaf5(int8_t out[257], const limb4 k) {
+    uint64_t v[5] = { k[0], k[1], k[2], k[3], 0 };
+    int n = 0;
+    while (v[0] | v[1] | v[2] | v[3] | v[4]) {
+        int8_t d = 0;
+        if (v[0] & 1) {
+            int m = (int)(v[0] & 31);
+            d = (int8_t)(m >= 16 ? m - 32 : m);
+            /* v -= d */
+            if (d > 0) {
+                uint64_t b = (uint64_t)d;
+                for (int i = 0; i < 5 && b; i++) {
+                    uint64_t old = v[i];
+                    v[i] = old - b;
+                    b = old < b;
+                }
+            } else {
+                uint64_t c = (uint64_t)(-d);
+                for (int i = 0; i < 5 && c; i++) {
+                    v[i] += c;
+                    c = v[i] < c;
+                }
+            }
+        }
+        out[n++] = d;
+        for (int i = 0; i < 4; i++) v[i] = (v[i] >> 1) | (v[i + 1] << 63);
+        v[4] >>= 1;
+    }
+    return n;
+}
+
+/* r = u1 G + u2 Q (variable time). */
+static void verify_mul(jpt *r, const limb4 u1, const limb4 u2, const jpt *q) {
+    const mont *f = &P256.fp;
+    /* u2 Q: odd multiples Q, 3Q, ..., 15Q */
+    jpt tab[8], q2;
+    tab[0] = *q;
+    jdbl(&q2, q);
+    for (int i = 1; i < 8; i++) jadd(&tab[i], &tab[i - 1], &q2, false);
+    int8_t naf[257];
+    int n = wnaf5(naf, u2);
+    jpt acc;
+    memset(&acc, 0, sizeof acc);
+    for (int i = n - 1; i >= 0; i--) {
+        jdbl(&acc, &acc);
+        int8_t d = naf[i];
+        if (d > 0) {
+            jadd(&acc, &acc, &tab[d >> 1], false);
+        } else if (d < 0) {
+            jpt neg;
+            jneg(&neg, &tab[(-d) >> 1]);
+            jadd(&acc, &acc, &neg, false);
+        }
+    }
+    /* u1 G: signed radix-16 digits, digit j adds |e_j| 16^j G from the table */
+    uint8_t s[32];
+    l4_to_be(s, u1);
+    int e[65];
+    for (int i = 0; i < 32; i++) {
+        e[2 * i] = s[31 - i] & 15;
+        e[2 * i + 1] = (s[31 - i] >> 4) & 15;
+    }
+    int carry = 0;
+    for (int i = 0; i < 64; i++) {
+        e[i] += carry;
+        carry = (e[i] + 8) >> 4;
+        e[i] -= carry << 4;
+    }
+    e[64] = carry;
+    jpt g;
+    for (int j = 0; j < 65; j++) {
+        if (e[j] == 0) continue;
+        int a = e[j] < 0 ? -e[j] : e[j];
+        l4_copy(g.X, P256_BASE[j][a - 1][0]);
+        if (e[j] < 0) {
+            limb4 zero = { 0, 0, 0, 0 };
+            mont_sub(f, g.Y, zero, P256_BASE[j][a - 1][1]);
+        } else {
+            l4_copy(g.Y, P256_BASE[j][a - 1][1]);
+        }
+        l4_copy(g.Z, f->one);
+        jadd(&acc, &acc, &g, true);
+    }
+    *r = acc;
+}
+
 bool zell__p256_verify(const uint8_t sig[64], const uint8_t pub[65], const uint8_t *digest, size_t dlen) {
     if (!scalar_ok(sig) || !scalar_ok(sig + 32)) return false;
     const curve k = P256;
@@ -499,7 +857,7 @@ bool zell__p256_verify(const uint8_t sig[64], const uint8_t pub[65], const uint8
     l4_from_be(r, sig);
     l4_from_be(s, sig + 32);
     mont_to(fn, s, s);
-    mont_inv(fn, w, s);
+    mont_inv_win(fn, w, s);
     limb4 em, rm;
     mont_to(fn, em, e);
     mont_to(fn, rm, r);
@@ -507,20 +865,22 @@ bool zell__p256_verify(const uint8_t sig[64], const uint8_t pub[65], const uint8
     mont_mul(fn, u2, rm, w);
     mont_from(fn, u1, u1);
     mont_from(fn, u2, u2);
-    uint8_t b1[32], b2[32];
-    l4_to_be(b1, u1);
-    l4_to_be(b2, u2);
-    pt A, B, X;
-    pt_mul_base(&k, &A, b1);
-    pt_mul(&k, &B, b2, &Q);
-    pt_add(&k, &X, &A, &B);
-    uint8_t xb[32];
-    if (!pt_affine(&k, &X, xb, NULL)) return false;
-    limb4 x, xd;
-    l4_from_be(x, xb);
-    uint64_t borrow = l4_sub(xd, x, N_M);
-    l4_cmov(x, xd, 0 - (borrow ^ 1));
+    jpt X;
+    verify_mul(&X, u1, u2, &Q);
+    if (fp_is_zero(X.Z)) return false;
+    /* x(X) mod n == r  <=>  X == r Z^2 or (r + n < p and X == (r + n) Z^2) */
+    limb4 z2, cand, t;
+    fp_sqr(z2, X.Z);
+    mont_to(&k.fp, cand, r);
+    fp_mul(t, cand, z2);
     limb4 diff;
-    l4_sub(diff, x, r);
+    l4_sub(diff, t, X.X);
+    if (l4_is_zero(diff)) return true;
+    limb4 rn;
+    uint64_t c = l4_add(rn, r, N_M);
+    if (c || !l4_lt(rn, P_M)) return false;
+    mont_to(&k.fp, cand, rn);
+    fp_mul(t, cand, z2);
+    l4_sub(diff, t, X.X);
     return l4_is_zero(diff) == 1;
 }
