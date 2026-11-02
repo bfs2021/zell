@@ -886,6 +886,11 @@ struct rows {
     havePending bool
     // The protocol exchange has been read up to ReadyForQuery.
     finished bool
+    // The current raw row (NextReadyRaw): the DataRow payload and, per
+    // column, the offset of its value and its length (-1: NULL).
+    raw    []byte
+    rawOff []int
+    rawLen []int
 
     // Reads up to the row description (or the end of a row-less result).
     async func start() void! {
@@ -966,6 +971,126 @@ struct rows {
 
     func Next(dest []any) Task<bool!> {
         return this.nextAsync(dest)
+    }
+
+    // database.sql.DriverRawRows: makes the next buffered DataRow (as
+    // NextReady finds it) the current raw row without decoding it (1); -1
+    // when the next buffered message is CommandComplete (the rows ended:
+    // the rest of the exchange is read before the connection's next
+    // operation, as after Close); 0 otherwise.
+    func NextReadyRaw() int {
+        if this.done || this.copyOut || this.c.cur != this {
+            return 0
+        }
+        if !this.c.mu.TryLock() {
+            return 0
+        }
+        var c = this.c
+        var p []byte = nil
+        var found = false
+        var consume = 0
+        if this.havePending {
+            p = this.pending
+            found = true
+        } else if len(c.buf) - c.pos >= 5 && int(c.buf[c.pos]) == 68 {
+            var n = be(c.buf, c.pos + 1, 4)
+            if n >= 4 && len(c.buf) - c.pos >= 1 + n {
+                p = c.buf[c.pos + 5..c.pos + 1 + n]
+                found = true
+                consume = 1 + n
+            }
+        }
+        if !found && len(c.buf) - c.pos >= 5 && int(c.buf[c.pos]) == 67 {
+            c.unlock()
+            return -1
+        }
+        if !found || !this.splitRow(p) {
+            c.unlock()
+            return 0
+        }
+        if this.havePending {
+            this.havePending = false
+            this.pending = []
+        }
+        c.pos += consume
+        c.unlock()
+        return 1
+    }
+
+    // Splits a DataRow payload into rawOff/rawLen; false if malformed or
+    // not of len(cols) columns (Next reports it).
+    func splitRow(p []byte) bool {
+        if len(p) < 2 {
+            return false
+        }
+        var n = bes(p, 0, 2)
+        if n != len(this.cols) {
+            return false
+        }
+        if len(this.rawOff) != n {
+            var offs []int = []
+            var lens []int = []
+            for _ in 0..n {
+                offs = append(offs, 0)
+                lens = append(lens, 0)
+            }
+            this.rawOff = offs
+            this.rawLen = lens
+        }
+        var at = 2
+        for i in 0..n {
+            if at + 4 > len(p) {
+                return false
+            }
+            var l = bes(p, at, 4)
+            at += 4
+            if l > 0 && at + l > len(p) {
+                return false
+            }
+            this.rawOff[i] = at
+            this.rawLen[i] = l
+            if l > 0 {
+                at += l
+            }
+        }
+        this.raw = p
+        return true
+    }
+
+    func RawInt(i int) (int, bool) {
+        var l = this.rawLen[i]
+        if l < 0 || this.cols[i].format != 1 {
+            return (0, false)
+        }
+        var oid = this.cols[i].oid
+        if (oid == 23 && l == 4) || (oid == 20 && l == 8) || (oid == 21 && l == 2) {
+            return (bes(this.raw, this.rawOff[i], l), true)
+        }
+        return (0, false)
+    }
+
+    func RawString(i int) (string, bool) {
+        var l = this.rawLen[i]
+        var oid = this.cols[i].oid
+        if l < 0 || !(oid == 25 || oid == 1043 || oid == 1042 || oid == 19) {
+            return ("", false)
+        }
+        var at = this.rawOff[i]
+        return (strings.FromBytes(this.raw[at..at + l]), true)
+    }
+
+    func RawValue(i int) any! {
+        var l = this.rawLen[i]
+        if l < 0 {
+            return nil
+        }
+        var at = this.rawOff[i]
+        var b = this.raw[at..at + l]
+        var c = this.cols[i]
+        if c.format == 1 {
+            return decodeBinary(c.oid, b)?
+        }
+        return decodeText(c.oid, strings.FromBytes(b))?
     }
 
     // database.sql.DriverReadyRows: the next DataRow if it is already

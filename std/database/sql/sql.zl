@@ -81,6 +81,21 @@ interface DriverReadyRows {
     func NextReady(dest []any) bool
 }
 
+// DriverRawRows is an optional extension of DriverRows for typed mapping
+// without boxing: NextReadyRaw makes the next already-received row current
+// without decoding it (1), reports that the rows have ended (-1: the
+// caller closes them), or that it cannot tell yet (0: nothing consumed,
+// use Next). RawInt and
+// RawString read column i of that row when its wire value is directly an
+// integer or a text of the database (ok == false otherwise, NULL included);
+// RawValue decodes column i as Next would.
+interface DriverRawRows {
+    func NextReadyRaw() int
+    func RawInt(i int) (int, bool)
+    func RawString(i int) (string, bool)
+    func RawValue(i int) any!
+}
+
 // DriverTx is a driver transaction.
 interface DriverTx {
     // Commit commits the transaction.
@@ -1143,7 +1158,21 @@ async func collect<T>(rows Rows) []T! {
     defer rows.Close()
     var m = fieldMap<T>(rows.st.cols)
     var out []T = []
+    var rr = rawRows<T>(rows.st)
     for {
+        if rr != nil {
+            var k = rr.NextReadyRaw()
+            if k > 0 {
+                rows.st.started = true
+                var x T
+                mapRowRaw(&x, rr, rows.st.cols, m)?
+                out = append(out, x)
+                continue
+            }
+            if k < 0 {
+                break
+            }
+        }
         if !rowsReady(rows.st) && !await rowsNext(rows.st)? {
             break
         }
@@ -1157,6 +1186,19 @@ async func collect<T>(rows Rows) []T! {
 async func collectOne<T>(rows Rows) T! {
     defer rows.Close()
     var m = fieldMap<T>(rows.st.cols)
+    var rr = rawRows<T>(rows.st)
+    if rr != nil {
+        var k = rr.NextReadyRaw()
+        if k > 0 {
+            rows.st.started = true
+            var x T
+            mapRowRaw(&x, rr, rows.st.cols, m)?
+            return x
+        }
+        if k < 0 {
+            return ErrNoRows
+        }
+    }
     if !rowsReady(rows.st) && !await rowsNext(rows.st)? {
         return ErrNoRows
     }
@@ -2152,6 +2194,70 @@ func fieldMap<T>(cols []string) []int {
         m = append(m, 0)
     }
     return m
+}
+
+// The driver rows for mapping rows to T field by field without boxing
+// (mapRowRaw), or nil: T must be a plain struct (not a Scanner, nor a type
+// mapRow treats as a scalar) and the driver must implement DriverRawRows.
+func rawRows<T>(st *rowsState) DriverRawRows {
+    if st.closed {
+        return nil
+    }
+    if !(reflect.TypeOf<T>().Kind == reflect.Kind.Struct &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<time.Time>()) &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<math.big.Decimal>()) &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<encoding.json.Value>())) {
+        return nil
+    }
+    var probe T
+    var a any = &probe
+    switch a {
+        case Scanner s:
+            return nil
+    }
+    var r any = st.r
+    switch r {
+        case DriverRawRows rr:
+            return rr
+    }
+    return nil
+}
+
+// mapRow for the current raw row of rr (see rawRows): int and string
+// fields are read straight from the row, others through RawValue and
+// convertInto, with the same results as mapRow.
+func mapRowRaw<T>(out *T, rr DriverRawRows, cols []string, m []int) void! {
+    // Folded per T: rawRows<T> is nil for scalar results, which never get here.
+    if reflect.TypeOf<T>().Kind == reflect.Kind.Struct &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<time.Time>()) &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<math.big.Decimal>()) &&
+        !(reflect.TypeOf<T>() == reflect.TypeOf<encoding.json.Value>()) {
+        var fi = 0
+        for f in reflect.Fields<T>() {
+            var idx = m[fi]
+            fi += 1
+            if idx >= 0 {
+                rawInto(&f.Get(*out), rr, idx, cols[idx])?
+            }
+        }
+    }
+}
+
+func rawInto<F>(p *F, rr DriverRawRows, i int, col string) void! {
+    if reflect.TypeOf<F>().Kind == reflect.Kind.Int {
+        var (v, ok) = rr.RawInt(i)
+        if ok {
+            *p = v
+            return
+        }
+    } else if reflect.TypeOf<F>().Kind == reflect.Kind.String {
+        var (v, ok) = rr.RawString(i)
+        if ok {
+            *p = v
+            return
+        }
+    }
+    convertInto(p, rr.RawValue(i)?, col)?
 }
 
 func mapRow<T>(out *T, vals []any, cols []string, m []int) void! {
