@@ -344,7 +344,12 @@ reserved) and cached mappings with `munmap`. Under a **memory limit**
 more than 15/16 of the limit minus the heap in use: checked when memory is
 freed and, for growth, each time the heap in use grew by 1 MB; the
 scavenger then also calls `malloc_trim`, and segments get no huge-page
-hint once the heap passes half the target. `zell_runtime_free_os_memory`
+hint once the heap passes half the target. **Huge pages** are opt-in
+(`ZELL_HUGEPAGES=1`): segments after the first get `MADV_HUGEPAGE`, far
+fewer page faults for a big heap, but with THP defrag on `madvise` (the
+usual setting) the first touch of a huge page may compact memory for
+milliseconds, a latency spike (100k timers on 32 workers: 39 ms mean
+lateness with it, 2.4 ms without). `zell_runtime_free_os_memory`
 releases everything at once. `diag.Runtime()` reports `HeapInUse`
 (owned pages, medium and large objects), `HeapRetained` (the reserve) and
 `HeapReleased` (pages given back whose address range is kept). The heap is
@@ -2416,6 +2421,7 @@ output still sitting in buffers may be lost if workers are still printing.
 | `ZELL_NO_SLAB=1` | objects come straight from `malloc` instead of the object heap (3.2), e.g. so Valgrind memcheck sees each object |
 | `ZELL_HEAP_RESERVE=n[K\|M\|G]` | free heap memory the scavenger leaves to the process (3.2; default 16M) |
 | `ZELL_MEMLIMIT=n[K\|M\|G\|T][iB]` / `off` | memory limit (3.2): overrides the container's (cgroup v2 `memory.max`/`memory.high`, v1 `memory.limit_in_bytes`, a Windows job object's); the heap keeps no reserve past 15/16 of it |
+| `ZELL_HUGEPAGES=1` | ask for transparent huge pages on heap segments after the first (3.2): fewer page faults for a big heap, possible compaction stalls (latency) |
 | `ZELL_LIMITS_DEBUG=1` | print the worker count, the usable CPUs and the memory limit with their sources when the scheduler starts |
 | `ZELL_NO_BIAS=1` | no thread owns objects: every refcount stays unowned (3.1), e.g. to compare |
 | `ZELL_RC_STATS=1` | at shutdown, print to stderr how many objects were biased, queued for a merge and merged by another thread (3.1) |

@@ -222,6 +222,7 @@ static inline void note_peak(void) {
  * code and malloc) by keeping no reserve that would pass the target, so
  * memory freed near the limit goes back to the OS at once. */
 static int64_t g_mem_limit;               /* atomic, bytes; 0: none */
+static int g_huge;                        /* ZELL_HUGEPAGES=1: huge-page hint on segments */
 static const char *g_mem_limit_src;
 static zell__plat_once g_limit_once = ZELL_PLAT_ONCE_INIT;
 
@@ -426,10 +427,13 @@ static hp_page *page_acquire(hp_heap *h, uint32_t c) {
                 if (s) zell__plat_mem_unmap(s, HP_SEG);
                 return NULL;
             }
-            /* From the second segment on, huge pages: a heap that grew past
-             * 4 MB takes far fewer page faults, a small program keeps its
-             * small RSS. */
-            if (g_segments && limit_room() > __atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED) / 2) zell__plat_mem_hint_huge(s, HP_SEG);
+            /* ZELL_HUGEPAGES=1, from the second segment on: huge pages, far
+             * fewer page faults for a big heap (a small program keeps its
+             * RSS). Not by default: with THP defrag on "madvise" (the usual
+             * setting) the first touch of a huge page may compact memory in
+             * the kernel for milliseconds, which made 100k 1-10 ms timers on
+             * 32 workers 39 ms late on average instead of 2.4 ms. */
+            if (g_huge && g_segments && limit_room() > __atomic_load_n(&g_mem_limit, __ATOMIC_RELAXED) / 2) zell__plat_mem_hint_huge(s, HP_SEG);
             s->next = g_segments;
             g_segments = s;
             g_seg_cur = s;
@@ -577,6 +581,8 @@ int64_t zell_runtime_set_mem_limit(int64_t n) {
 static void mode_init(void) {
     int on = HP_ENABLED;
     zell__plat_once_run(&g_limit_once, limit_init);
+    const char *hp = getenv("ZELL_HUGEPAGES");
+    g_huge = hp && *hp && *hp != '0';
     const char *e = getenv("ZELL_NO_SLAB");
     if (e && *e && *e != '0') on = 0;
     if (on && !zell__plat_tls_new(&g_key, heap_thread_exit)) on = 0;
