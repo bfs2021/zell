@@ -480,9 +480,11 @@ async func main() void! {
     db.SetMaxOpenConns(1)
     defer db.Close()
     await db.Ping()?
-    var n = await db.QueryOne<int>("select 1", [])?
+    // A trailing ";" keeps an argument-less query on the simple protocol
+    // (text results); without it database.sql prepares and caches it.
+    var n = await db.QueryOne<int>("select 1;", [])?
     println("simple", n)
-    var items = await db.Query<Item>("select * from items", [])?
+    var items = await db.Query<Item>("select * from items;", [])?
     for it in items {
         println(
             "text",

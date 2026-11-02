@@ -2259,11 +2259,18 @@ void zell_task_rt_fire(zell_task *t) {
 
 void zell_task_spin_lock(int64_t *slot) {
     if (!slot) zell_panic_nil();
+    /* Spin with cpu_relax (backing off: 1, 2, ... 8 hints a poll) while the
+     * holder runs its few statements; yield the CPU only after that, so a
+     * contended lock does not turn into a sched_yield syscall storm. */
     for (int spins = 0;; spins++) {
         if (__atomic_load_n(slot, __ATOMIC_RELAXED) == 0 &&
             __atomic_exchange_n(slot, 1, __ATOMIC_ACQUIRE) == 0)
             return;
-        if (spins > 64) zell__plat_yield();
+        if (spins < 128) {
+            for (int k = 0; k <= spins >> 4; k++) zell__plat_cpu_relax();
+        } else {
+            zell__plat_yield();
+        }
     }
 }
 

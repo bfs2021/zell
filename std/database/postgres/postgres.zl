@@ -127,7 +127,7 @@ struct writer {
     }
 
     func raw(d []byte) {
-        this.b = compress.rtConcat(this.b, d)
+        this.b = append(this.b, d...)
     }
 }
 
@@ -153,6 +153,8 @@ struct conn {
     cur      *rows
     stmtSeq  int
     toClose  []string
+    // the frontend message buffer, reused by extended (under mu)
+    wbuf []byte
     onNotice func(Error)
     onNotify func(Notification)
     cfg      Config
@@ -170,6 +172,12 @@ struct conn {
             if len(chunk) == 0 {
                 this.bad = true
                 return error("postgres: server closed the connection")
+            }
+            if this.pos >= len(this.buf) {
+                // everything read: the chunk becomes the buffer, no copy
+                this.buf = chunk
+                this.pos = 0
+                continue
             }
             if this.pos > 0 {
                 this.buf = this.buf[this.pos..]
@@ -191,7 +199,13 @@ struct conn {
                 return error("postgres: protocol error (bad message length)")
             }
             await this.fill(1 + n)?
-            var payload = compress.rtCopy(this.buf, this.pos + 5, this.pos + 1 + n)
+            // The buffer is never written in place (fill replaces it), so a
+            // small payload can share it; a large one is copied so that it
+            // does not keep a whole read chunk alive.
+            var payload = this.buf[this.pos + 5..this.pos + 1 + n]
+            if n > 4096 {
+                payload = compress.rtCopy(this.buf, this.pos + 5, this.pos + 1 + n)
+            }
             this.pos += 1 + n
             if t == 78 {
                 // 'N' NoticeResponse
@@ -224,6 +238,26 @@ struct conn {
         }
     }
 
+    // recv without suspending: the next message if it is already buffered
+    // and needs no callback (notices, notifications and parameter status
+    // go through recv); ok == false leaves the buffer untouched.
+    func tryRecv() (int, []byte, bool) {
+        if len(this.buf) - this.pos < 5 {
+            return (0, nil, false)
+        }
+        var t = int(this.buf[this.pos])
+        if t == 78 || t == 65 || t == 83 {
+            return (0, nil, false)
+        }
+        var n = be(this.buf, this.pos + 1, 4)
+        if n < 4 || n > 4096 || len(this.buf) - this.pos < 1 + n {
+            return (0, nil, false)
+        }
+        var payload = this.buf[this.pos + 5..this.pos + 1 + n]
+        this.pos += 1 + n
+        return (t, payload, true)
+    }
+
     async func send(w writer) void! {
         try await this.s.Write(w.b) catch err {
             this.bad = true
@@ -235,7 +269,10 @@ struct conn {
     async func sync(first error) void! {
         var err = first
         for {
-            var (t, p) = await this.recv()?
+            var (t, p, ok) = this.tryRecv()
+            if !ok {
+                (t, p) = await this.recv()?
+            }
             if t == 69 {
                 if err == nil {
                     err = parseError(p)
@@ -345,7 +382,9 @@ struct conn {
     // ---- operations (serialized by mu) ----
 
     async func lock() void! {
-        await this.mu.Lock()
+        if !this.mu.TryLock() {
+            await this.mu.Lock()
+        }
         if this.cur != nil {
             var r = this.cur
             this.cur = nil
@@ -461,7 +500,8 @@ struct conn {
     // a prepared st has its columns already, so binary results are asked
     // for the types decodeBinary knows.
     async func extended(name string, query string, st *stmt, args []any, isQuery bool) *rows! {
-        var w = writer{}
+        var w = writer{b: this.wbuf[..0]}
+        this.wbuf = nil
         w = this.flushCloses(w)
         var cols []column = []
         if st == nil {
@@ -539,6 +579,9 @@ struct conn {
         w.begin(83)
         w.end()
         await this.send(w)?
+        if len(w.b) <= 65536 {
+            this.wbuf = w.b
+        }
         var r = new rows{c: this, cols: cols, described: st != nil}
         await r.start()?
         return r
@@ -847,7 +890,10 @@ struct rows {
     // Reads up to the row description (or the end of a row-less result).
     async func start() void! {
         for {
-            var (t, p) = await this.c.recv()?
+            var (t, p, ok) = this.c.tryRecv()
+            if !ok {
+                (t, p) = await this.c.recv()?
+            }
             if t == 49 || t == 50 || t == 51 {
                 // ParseComplete, BindComplete, CloseComplete
                 continue
@@ -922,6 +968,43 @@ struct rows {
         return this.nextAsync(dest)
     }
 
+    // database.sql.DriverReadyRows: the next DataRow if it is already
+    // buffered (and the connection is free), decoded without suspending;
+    // false leaves everything to nextAsync (ends, errors, other messages).
+    func NextReady(dest []any) bool {
+        if this.done || this.copyOut || this.c.cur != this {
+            return false
+        }
+        if !this.c.mu.TryLock() {
+            return false
+        }
+        var ok = false
+        if this.havePending {
+            try this.decodeRow(this.pending, dest) catch err {
+                this.c.unlock()
+                return false
+            }
+            this.havePending = false
+            this.pending = []
+            ok = true
+        } else {
+            var c = this.c
+            if len(c.buf) - c.pos >= 5 && int(c.buf[c.pos]) == 68 {
+                var n = be(c.buf, c.pos + 1, 4)
+                if n >= 4 && len(c.buf) - c.pos >= 1 + n {
+                    try this.decodeRow(c.buf[c.pos + 5..c.pos + 1 + n], dest) catch err {
+                        c.unlock()
+                        return false
+                    }
+                    c.pos += 1 + n
+                    ok = true
+                }
+            }
+        }
+        this.c.unlock()
+        return ok
+    }
+
     func decodeRow(p []byte, dest []any) void! {
         if this.copyOut {
             var line = strings.FromBytes(p)
@@ -976,7 +1059,10 @@ struct rows {
             return true
         }
         for {
-            var (t, p) = await this.c.recv()?
+            var (t, p, ok) = this.c.tryRecv()
+            if !ok {
+                (t, p) = await this.c.recv()?
+            }
             if t == 68 || (t == 100 && this.copyOut) {
                 var p2 = p
                 if t == 68 || this.copyOut {
@@ -1050,7 +1136,10 @@ struct rows {
     async func finishExec() database.sql.Result! {
         if !this.done {
             for {
-                var (t, p) = await this.c.recv()?
+                var (t, p, ok) = this.c.tryRecv()
+                if !ok {
+                    (t, p) = await this.c.recv()?
+                }
                 if t == 67 || t == 73 {
                     this.tag = cstrOf(p)
                     await this.c.sync(nil)?

@@ -72,6 +72,15 @@ interface DriverRows {
     func Close() void!
 }
 
+// DriverReadyRows is an optional extension of DriverRows: NextReady
+// stores the next row into dest without suspending when the driver has
+// already received it, and reports whether it did. On false nothing is
+// consumed and the caller falls back to Next (which also handles the end
+// of the result and errors).
+interface DriverReadyRows {
+    func NextReady(dest []any) bool
+}
+
 // DriverTx is a driver transaction.
 interface DriverTx {
     // Commit commits the transaction.
@@ -266,6 +275,14 @@ struct poolConn {
         return this.stmtAsync(query, limit)
     }
 
+    // The cached statement for query (nil if not cached), without a task.
+    func cachedStmt(query string, limit int) DriverStmt {
+        if limit <= 0 || this.stmts == nil {
+            return nil
+        }
+        return this.stmts[query]
+    }
+
     async func stmtAsync(query string, limit int) DriverStmt! {
         if limit <= 0 {
             return await this.c.Prepare(query)?
@@ -306,9 +323,14 @@ struct poolConn {
     }
 }
 
+// A task waiting in acquire. release hands it a connection directly (pc,
+// set under the pool lock, then sig fired after unlocking), so a returned
+// connection never goes back to the idle list while someone waits; a
+// waiter fired with pc == nil retries (a slot was freed, or the pool closed).
+// sig is an rtSignal: cancelling the waiting task fires it too.
 struct waiter {
-    id int
-    ch task.Channel<int>
+    sig Task<void>
+    pc  *poolConn
 }
 
 // Pool statistics (DB.Stats).
@@ -331,8 +353,9 @@ struct dbState {
     dsn         string
     idle        []*poolConn
     numOpen     int
-    waiters     []waiter
-    nextWaiter  int
+    waiters     []*waiter
+    // The last acquire found no connection (a hint for the next one).
+    mustWait    bool
     closed      bool
     maxOpen     int
     maxIdle     int = 2
@@ -350,12 +373,52 @@ struct dbState {
         task.rtUnlock(&this.guard)
     }
 
-    // Under the lock: wakes the oldest waiter (it retries acquire).
-    func wakeOne() {
-        if len(this.waiters) > 0 {
-            var w = this.waiters[0]
-            this.waiters = this.waiters[1..]
-            _ = w.ch.Send(1)
+    // Under the lock: takes the oldest waiter off the queue (nil if none).
+    // The caller sets its pc (or leaves it nil: the waiter retries) and
+    // fires it with wake after unlocking.
+    func popWaiter() *waiter {
+        if len(this.waiters) == 0 {
+            return nil
+        }
+        var w = this.waiters[0]
+        this.waiters = this.waiters[1..]
+        return w
+    }
+
+    // Under the lock: removes w from the queue; false if it was not queued
+    // (already popped by a release or wakeSlots).
+    func removeWaiter(w *waiter) bool {
+        var found = false
+        var keep = 0
+        for x in this.waiters {
+            if x == w {
+                found = true
+            } else {
+                this.waiters[keep] = x
+                keep += 1
+            }
+        }
+        this.waiters = this.waiters[..keep]
+        return found
+    }
+
+    // Wakes waiters to retry, one per freed slot (call without the lock).
+    func wakeSlots(n int) {
+        if n <= 0 {
+            return
+        }
+        var ws []*waiter = []
+        this.lock()
+        for _ in 0..n {
+            var w = this.popWaiter()
+            if w == nil {
+                break
+            }
+            ws = append(ws, w)
+        }
+        this.unlock()
+        for w in ws {
+            task.rtFire(w.sig)
         }
     }
 
@@ -372,14 +435,19 @@ struct dbState {
     }
 
     // Under the lock: removes expired idle connections (closed by the
-    // caller after unlocking).
+    // caller after unlocking). Without idle-time and lifetime limits
+    // nothing expires and nothing is allocated.
     func sweep(now int) []*poolConn {
-        var dead []*poolConn = []
-        var keep []*poolConn = []
+        if this.maxLifetime <= 0 && this.maxIdleTime <= 0 {
+            return nil
+        }
+        var dead []*poolConn
+        var keep = 0
         for pc in this.idle {
             var why = this.expired(pc, now)
             if why == 0 {
-                keep = append(keep, pc)
+                this.idle[keep] = pc
+                keep += 1
             } else {
                 if why == 1 {
                     this.stats.MaxIdleTimeClosed += 1
@@ -390,27 +458,34 @@ struct dbState {
                 dead = append(dead, pc)
             }
         }
-        this.idle = keep
+        this.idle = this.idle[..keep]
         return dead
     }
 
     func closeAll(pcs []*poolConn) {
+        if len(pcs) == 0 {
+            return
+        }
         for pc in pcs {
             pc.close()
         }
-        if len(pcs) > 0 {
-            this.lock()
-            for _ in pcs {
-                this.wakeOne()
-            }
-            this.unlock()
-        }
+        this.wakeSlots(len(pcs))
     }
 
     async func acquire() *poolConn! {
+        // The waiter is made outside the lock (rtSignal allocates and
+        // registers a cancel hook): the first pass that finds no connection
+        // drops the lock, makes it and retries.
+        var w *waiter = nil
         for {
             task.CheckCancelled()?
             var now = nowMs()
+            if w == nil && this.mustWait {
+                // A hint read without the lock (an int, so no reference is
+                // taken): the last acquire had to wait, so this one likely
+                // will too; making the waiter first saves a second locking.
+                w = new waiter{sig: task.rtSignal()}
+            }
             this.lock()
             if this.closed {
                 this.unlock()
@@ -421,6 +496,7 @@ struct dbState {
                 var n = len(this.idle)
                 var pc = this.idle[n - 1]
                 this.idle = this.idle[..n - 1]
+                this.mustWait = false
                 this.unlock()
                 this.closeAll(dead)
                 if !pc.c.IsValid() {
@@ -437,46 +513,59 @@ struct dbState {
                         continue
                     }
                 }
+                unusedWaiter(w)
                 return pc
             }
             if this.maxOpen <= 0 || this.numOpen < this.maxOpen {
                 this.numOpen += 1
+                this.mustWait = false
                 this.unlock()
                 this.closeAll(dead)
+                unusedWaiter(w)
                 var c = try await this.driver.Open(this.dsn) catch err {
                     this.lock()
                     this.numOpen -= 1
-                    this.wakeOne()
                     this.unlock()
+                    this.wakeSlots(1)
                     return err
                 }
                 var t = nowMs()
                 return new poolConn{c: c, created: t, lastUsed: t}
             }
-            this.nextWaiter += 1
-            var w = waiter{id: this.nextWaiter, ch: task.Channel<int>(1)}
+            this.mustWait = true
+            if w == nil {
+                this.unlock()
+                this.closeAll(dead)
+                w = new waiter{sig: task.rtSignal()}
+                continue
+            }
             this.waiters = append(this.waiters, w)
             this.stats.WaitCount += 1
             this.unlock()
             this.closeAll(dead)
-            try await w.ch.Recv() catch err {
+            await w.sig
+            // A hand-off sets pc before firing, so a non-nil pc is final
+            // without the lock; nil (a retry wake-up, cancellation, or a
+            // hand-off racing with cancellation) is settled under it.
+            var pc = w.pc
+            var queued = false
+            if pc == nil {
                 this.lock()
-                var found = false
-                var rest []waiter = []
-                for x in this.waiters {
-                    if x.id == w.id {
-                        found = true
-                    } else {
-                        rest = append(rest, x)
-                    }
-                }
-                this.waiters = rest
-                if !found {
-                    // Woken and cancelled at once: pass the wake-up on.
-                    this.wakeOne()
-                }
+                pc = w.pc
+                queued = pc == nil && this.removeWaiter(w)
                 this.unlock()
-                return err
+            }
+            w = nil
+            if pc != nil {
+                if task.IsCancelled() {
+                    this.release(pc)
+                    task.CheckCancelled()?
+                }
+                return pc
+            }
+            if !queued && task.IsCancelled() {
+                // Woken to retry and cancelled at once: pass the wake-up on.
+                this.wakeSlots(1)
             }
         }
     }
@@ -486,11 +575,12 @@ struct dbState {
         pc.close()
         this.lock()
         this.numOpen -= 1
-        this.wakeOne()
         this.unlock()
+        this.wakeSlots(1)
     }
 
-    // Returns a borrowed connection.
+    // Returns a borrowed connection: handed straight to the oldest waiter
+    // if there is one, else kept idle (or closed).
     func release(pc *poolConn) {
         var now = nowMs()
         var drop = !pc.c.IsValid()
@@ -498,21 +588,34 @@ struct dbState {
         if !drop && (this.closed || this.expired(pc, now) != 0) {
             drop = true
         }
-        if !drop && len(this.idle) >= this.maxIdle {
+        var w = this.popWaiter()
+        if !drop && w == nil && len(this.idle) >= this.maxIdle {
             this.stats.MaxIdleClosed += 1
             drop = true
         }
+        pc.lastUsed = now
         if drop {
             this.numOpen -= 1
+        } else if w != nil {
+            w.pc = pc
         } else {
-            pc.lastUsed = now
             this.idle = append(this.idle, pc)
         }
-        this.wakeOne()
         this.unlock()
+        if w != nil {
+            task.rtFire(w.sig)
+        }
         if drop {
             pc.close()
         }
+    }
+}
+
+// Completes the signal of a waiter that was made but never queued, so the
+// cancel hook it registered on the task can be dropped.
+func unusedWaiter(w *waiter) {
+    if w != nil {
+        task.rtFire(w.sig)
     }
 }
 
@@ -606,7 +709,7 @@ struct DB {
         this.st.waiters = []
         this.st.unlock()
         for w in ws {
-            w.ch.Close()
+            task.rtFire(w.sig)
         }
         for pc in idle {
             pc.close()
@@ -752,6 +855,15 @@ struct Stmt {
 // parameters.
 func prepareArgs(query string, args []any, style int) (string, []any)! {
     var (q, a) = rewriteNamed(query, args, style)?
+    var plain = true
+    for x in a {
+        if !isDriverValue(x) {
+            plain = false
+        }
+    }
+    if plain {
+        return (q, a)
+    }
     var out []any = []
     for x in a {
         out = append(out, driverValue(x))
@@ -764,7 +876,10 @@ async func execOn(db *dbState, pc *poolConn, query string, args []any) Result! {
     if len(a) == 0 {
         return await pc.c.Exec(q, a)?
     }
-    var s = await pc.stmt(q, db.stmtCache)?
+    var s = pc.cachedStmt(q, db.stmtCache)
+    if s == nil {
+        s = await pc.stmt(q, db.stmtCache)?
+    }
     if db.stmtCache <= 0 {
         defer closeStmt(s)
     }
@@ -773,15 +888,30 @@ async func execOn(db *dbState, pc *poolConn, query string, args []any) Result! {
 
 async func queryOn(db *dbState, pc *poolConn, query string, args []any) DriverRows! {
     var (q, a) = prepareArgs(query, args, pc.c.Placeholder())?
-    if len(a) == 0 {
+    if len(a) == 0 && !cacheable(q, db.stmtCache) {
         return await pc.c.Query(q, a)?
     }
-    var s = await pc.stmt(q, db.stmtCache)?
+    var s = pc.cachedStmt(q, db.stmtCache)
+    if s == nil {
+        s = await pc.stmt(q, db.stmtCache)?
+    }
     if db.stmtCache <= 0 {
         // The driver keeps the portal alive until the rows are closed.
         defer closeStmt(s)
     }
     return await s.Query(a)?
+}
+
+// Whether a query without arguments goes through the statement cache like
+// one with arguments (prepared once per connection: no re-parsing, and
+// drivers can send typed results). Several statements (";") and COPY keep
+// the driver's direct path, which supports them.
+func cacheable(q string, cache int) bool {
+    if cache <= 0 || strings.Contains(q, ";") {
+        return false
+    }
+    var t = strings.TrimLeft(q, " \t\r\n(")
+    return !(len(t) >= 4 && strings.EqualFold(t[..4], "copy"))
 }
 
 func closeStmt(s DriverStmt) {
@@ -902,6 +1032,37 @@ struct Rows {
     }
 }
 
+// The synchronous fast path of rowsNext: the next row if the driver
+// already has it (DriverReadyRows), else false and rowsNext must be awaited.
+func rowsReady(st *rowsState) bool {
+    if st.closed {
+        return false
+    }
+    var r any = st.r
+    switch r {
+        case DriverReadyRows rr:
+            resetVals(st)
+            st.started = true
+            return rr.NextReady(st.vals)
+    }
+    return false
+}
+
+// Sizes st.vals to the columns and clears it for the next row.
+func resetVals(st *rowsState) {
+    if st.vals == nil || len(st.vals) != len(st.cols) {
+        var vs []any = []
+        for _ in st.cols {
+            vs = append(vs, nil)
+        }
+        st.vals = vs
+    } else {
+        for i in 0..len(st.vals) {
+            st.vals[i] = nil
+        }
+    }
+}
+
 async func rowsNext(st *rowsState) bool! {
     if st.closed {
         return false
@@ -982,7 +1143,10 @@ async func collect<T>(rows Rows) []T! {
     defer rows.Close()
     var m = fieldMap<T>(rows.st.cols)
     var out []T = []
-    for await rows.Next()? {
+    for {
+        if !rowsReady(rows.st) && !await rowsNext(rows.st)? {
+            break
+        }
         var x T
         mapRow(&x, rows.st.vals, rows.st.cols, m)?
         out = append(out, x)
@@ -993,7 +1157,7 @@ async func collect<T>(rows Rows) []T! {
 async func collectOne<T>(rows Rows) T! {
     defer rows.Close()
     var m = fieldMap<T>(rows.st.cols)
-    if !await rows.Next()? {
+    if !rowsReady(rows.st) && !await rowsNext(rows.st)? {
         return ErrNoRows
     }
     var x T
@@ -1204,6 +1368,19 @@ func namedStub(query string) map[string]any {
 }
 
 func rewriteNamed(query string, args []any, style int) (string, []any)! {
+    // The common case (positional arguments only) allocates nothing.
+    var anyNamed = false
+    for a in args {
+        switch a {
+            case NamedArg n:
+                anyNamed = true
+            case map[string]any m:
+                anyNamed = true
+        }
+    }
+    if !anyNamed {
+        return (query, args)
+    }
     var names []string = []
     var values []any = []
     var named = false
@@ -1315,6 +1492,25 @@ func rewriteNamed(query string, args []any, style int) (string, []any)! {
 // The driver value of an argument: integers become int, float32 float,
 // Valuer values their SqlValue, big.Decimal its string; other values
 // (nil, int, float, bool, string, []byte, time.Time, []any) pass as is.
+// Whether driverValue(a) is a itself (no conversion, no copy needed).
+func isDriverValue(a any) bool {
+    switch a {
+        case nil:
+            return true
+        case int n:
+            return true
+        case string s:
+            return true
+        case float f:
+            return true
+        case bool b:
+            return true
+        case []byte b:
+            return true
+    }
+    return false
+}
+
 func driverValue(a any) any {
     switch a {
         case nil:
@@ -1928,8 +2124,6 @@ func fieldMap<T>(cols []string) []int {
                         }
                     }
                 } else {
-                    var lower = strings.ToLower(f.Name)
-                    var snake = SnakeCase(f.Name)
                     for i, c in cols {
                         if idx < 0 && c == f.Name {
                             idx = i
@@ -1937,8 +2131,15 @@ func fieldMap<T>(cols []string) []int {
                     }
                     if idx < 0 {
                         for i, c in cols {
-                            var lc = strings.ToLower(c)
-                            if idx < 0 && (lc == lower || lc == snake) {
+                            if idx < 0 && strings.EqualFold(c, f.Name) {
+                                idx = i
+                            }
+                        }
+                    }
+                    if idx < 0 {
+                        var snake = SnakeCase(f.Name)
+                        for i, c in cols {
+                            if idx < 0 && strings.EqualFold(c, snake) {
                                 idx = i
                             }
                         }

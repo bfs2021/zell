@@ -221,7 +221,9 @@ switch any {
   `sql.OpenDriver(d, dsn)`; `postgres.Open(dsn)`, `sqlite.Open(dsn)` —
   без регистрации.
 - `DB` — асинхронный пул: `SetMaxOpenConns` (ожидающие задачи — FIFO,
-  ожидание отменяется контекстом), `SetMaxIdleConns` (по умолчанию 2),
+  ожидание отменяется контекстом; возвращаемое соединение передаётся
+  старейшему ожидающему напрямую, минуя список простаивающих, так что
+  пришедший позже не перехватывает его), `SetMaxIdleConns` (по умолчанию 2),
   `SetConnMaxIdleTime`, `SetConnMaxLifetime`, `SetHealthCheck` (ping
   простоявшего соединения перед выдачей, по умолчанию после 30 с),
   `SetStmtCacheSize` (кэш подготовленных выражений на соединение, 64),
@@ -243,7 +245,10 @@ switch any {
 - Аргументы — `[]any`; именованные `:name` (`sql.Named("name", v)` или один
   `map[string]any`) переписываются в `$1..` или `?` по драйверу
   (`sql.RewriteNamed`; строки, идентификаторы в кавычках, комментарии и
-  `::` пропускаются).
+  `::` пропускаются). Запрос без аргументов идёт через кэш подготовленных
+  выражений, как запрос с аргументами, если в нём нет `;` и это не `COPY`;
+  иначе — напрямую драйверу (у PostgreSQL — simple query: несколько команд,
+  текстовые результаты).
 - `Begin() Tx!` (`Exec`, `QueryRows`, `QueryRow`, `Query<T>`, `QueryOne<T>`,
   `Commit`, `Rollback`; идиома `defer tx.Rollback()` — после `Commit`
   ничего не делает и возвращает `ErrTxDone`), `Transact(f)`, `Prepare(q)
@@ -255,7 +260,7 @@ switch any {
   `key=value`, переменные `PG*`, Unix-сокеты (`host=/dir`); sslmode
   `disable/allow/prefer/require/verify-ca/verify-full` (`sslrootcert`);
   аутентификация trust, password, MD5, SCRAM-SHA-256 (без channel
-  binding); simple query (без аргументов, несколько команд) и extended
+  binding); simple query (`Exec` без аргументов, запросы с `;` и `COPY`) и extended
   protocol с именованными подготовленными выражениями, бинарные результаты
   для bool/int2/4/8/oid/float4/8/bytea/uuid/timestamp(tz)/date/text/json(b),
   текст для остальных (numeric → строка → `big.Decimal`, interval, массивы

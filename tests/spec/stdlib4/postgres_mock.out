@@ -21,8 +21,8 @@ server: startup protocol 196608 user=tester database=shop application_name=spec
 server: auth SCRAM-SHA-256 n,,n=,r=<nonce>
 server: auth: proof ok
 server: Q 
-server: Q select 1
-server: Q select * from items
+server: Q select 1;
+server: Q select * from items;
 server: Parse zell_1 select * from items where id > $1
 server: Bind zell_1 args=[0] formats=[1 1 1 0 0 1 1]
 server: Parse zell_2 select $1
