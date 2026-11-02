@@ -136,22 +136,44 @@ static void sha256_blocks(uint32_t *h, const uint8_t *p, size_t n) {
     for (; n; n--, p += 64) sha256_block(h, p);
 }
 
+/* SHA-512 compression: rounds unrolled by eight with the roles of the
+ * working variables rotated instead of moved, the message schedule kept
+ * in a 16-word ring and expanded as the rounds go. */
+#define S512_SIGMA0(a) (ror64(a, 28) ^ ror64(a, 34) ^ ror64(a, 39))
+#define S512_SIGMA1(e) (ror64(e, 14) ^ ror64(e, 18) ^ ror64(e, 41))
+#define S512_s0(x) (ror64(x, 1) ^ ror64(x, 8) ^ ((x) >> 7))
+#define S512_s1(x) (ror64(x, 19) ^ ror64(x, 61) ^ ((x) >> 6))
+#define S512_ROUND(a, b, c, d, e, f, g, h, k, w)                                      do {                                                                                  uint64_t t1_ = (h) + S512_SIGMA1(e) + ((g) ^ ((e) & ((f) ^ (g)))) + (k) + (w);         uint64_t t2_ = S512_SIGMA0(a) + (((a) & (b)) | ((c) & ((a) | (b))));                (d) += t1_;                                                                       (h) = t1_ + t2_;                                                              } while (0)
+#define S512_W(i) (w[(i) & 15] += S512_s1(w[((i) - 2) & 15]) + w[((i) - 7) & 15] + S512_s0(w[((i) - 15) & 15]))
+
 static void sha512_block(uint64_t *h, const uint8_t *p) {
-    uint64_t w[80];
+    uint64_t w[16];
     for (int t = 0; t < 16; t++) w[t] = zell__ld64be(p + 8 * t);
-    for (int t = 16; t < 80; t++) {
-        uint64_t s0 = ror64(w[t - 15], 1) ^ ror64(w[t - 15], 8) ^ (w[t - 15] >> 7);
-        uint64_t s1 = ror64(w[t - 2], 19) ^ ror64(w[t - 2], 61) ^ (w[t - 2] >> 6);
-        w[t] = w[t - 16] + s0 + w[t - 7] + s1;
-    }
     uint64_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
-    for (int t = 0; t < 80; t++) {
-        uint64_t t1 = hh + (ror64(e, 14) ^ ror64(e, 18) ^ ror64(e, 41)) + ((e & f) ^ (~e & g)) + K512[t] + w[t];
-        uint64_t t2 = (ror64(a, 28) ^ ror64(a, 34) ^ ror64(a, 39)) + ((a & b) ^ (a & c) ^ (b & c));
-        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    for (int t = 0; t < 16; t += 8) {
+        S512_ROUND(a, b, c, d, e, f, g, hh, K512[t + 0], w[t + 0]);
+        S512_ROUND(hh, a, b, c, d, e, f, g, K512[t + 1], w[t + 1]);
+        S512_ROUND(g, hh, a, b, c, d, e, f, K512[t + 2], w[t + 2]);
+        S512_ROUND(f, g, hh, a, b, c, d, e, K512[t + 3], w[t + 3]);
+        S512_ROUND(e, f, g, hh, a, b, c, d, K512[t + 4], w[t + 4]);
+        S512_ROUND(d, e, f, g, hh, a, b, c, K512[t + 5], w[t + 5]);
+        S512_ROUND(c, d, e, f, g, hh, a, b, K512[t + 6], w[t + 6]);
+        S512_ROUND(b, c, d, e, f, g, hh, a, K512[t + 7], w[t + 7]);
+    }
+    for (int t = 16; t < 80; t += 8) {
+        S512_ROUND(a, b, c, d, e, f, g, hh, K512[t + 0], S512_W(t + 0));
+        S512_ROUND(hh, a, b, c, d, e, f, g, K512[t + 1], S512_W(t + 1));
+        S512_ROUND(g, hh, a, b, c, d, e, f, K512[t + 2], S512_W(t + 2));
+        S512_ROUND(f, g, hh, a, b, c, d, e, K512[t + 3], S512_W(t + 3));
+        S512_ROUND(e, f, g, hh, a, b, c, d, K512[t + 4], S512_W(t + 4));
+        S512_ROUND(d, e, f, g, hh, a, b, c, K512[t + 5], S512_W(t + 5));
+        S512_ROUND(c, d, e, f, g, hh, a, b, K512[t + 6], S512_W(t + 6));
+        S512_ROUND(b, c, d, e, f, g, hh, a, K512[t + 7], S512_W(t + 7));
     }
     h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
+#undef S512_W
+#undef S512_ROUND
 
 static void sha1_block(uint32_t *h, const uint8_t *p) {
     uint32_t w[80];
