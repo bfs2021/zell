@@ -24,7 +24,8 @@
 #
 # Assets of release v<version>:
 #   zell-<version>-<host>.tar.xz(.sha256)          host: linux-amd64, linux-arm64,
-#                                                  macos-arm64, macos-amd64, windows-amd64
+#                                                  macos-arm64, windows-amd64 (macos-amd64 waits
+#                                                  for an LLVM 23 build for x86-64 macOS)
 #                                                  (windows-amd64 also .tar.gz)
 #   zell-runtime-<version>-<triple>.tar.gz(.sha256) one per runtime that built
 #   SHA256SUMS, VERSION
@@ -104,7 +105,9 @@ jobs:
           HOSTS: ${{ github.event_name == 'push' && 'all' || inputs.hosts }}
         run: |
           linux='{"host":"linux-amd64","os":"ubuntu-24.04"},{"host":"linux-arm64","os":"ubuntu-24.04-arm","optional":true}'
-          macos='{"host":"macos-arm64","os":"macos-14"},{"host":"macos-amd64","os":"macos-15-intel"}'
+          # macos-amd64 waits for an LLVM 23 build for x86-64 macOS (Homebrew,
+          # or an official one; scripts/macos-llvm.sh has arm64 only)
+          macos='{"host":"macos-arm64","os":"macos-14"}'
           if [ "$HOSTS" = linux ]; then m="[$linux]"; else m="[$linux,$macos]"; fi
           echo "unix_matrix=$m" >> "$GITHUB_OUTPUT"
           echo "building: $m"
@@ -198,46 +201,8 @@ jobs:
       - name: LLVM 23 (macOS; llvm@18 only for bin/lld)
         if: runner.os == 'macOS'
         run: |
-          # LLVM 23 for the compiler (llvm-sys 231): Homebrew's llvm@23, else
-          # its llvm (checked to be 23)
-          f=llvm; brew info llvm@23 >/dev/null 2>&1 && f=llvm@23
-          brew install "$f"
-          llvm=$(brew --prefix "$f")
-          v=$("$llvm/bin/llvm-config" --version)
-          case "$v" in 23.*) ;; *) echo "::error::Homebrew $f is LLVM $v, need 23"; exit 1 ;; esac
           brew install llvm@18 lld zstd
-          # Self-contained binaries: the Rust build must see only LLVM's static
-          # archives, never Homebrew's lib directory. With -L<llvm>/lib on the
-          # link line, -lc++ resolves to Homebrew's libc++.dylib, which
-          # re-exports its libunwind.1.dylib, and bin/zell then depends on
-          # /opt/homebrew (the otool check below fails). So llvm-sys gets a
-          # shim prefix: libLLVM*.a by symlink in a directory of its own, and an
-          # llvm-config wrapper answering --libdir/--ldflags with that directory.
-          shim=$RUNNER_TEMP/llvm-static
-          mkdir -p "$shim/bin" "$shim/lib"
-          ln -s "$llvm/include" "$shim/include"
-          # every static archive llvm-config may name (LLVM, Polly, ...), but no
-          # libc++/libunwind: those must come from the OS
-          for a in "$llvm"/lib/lib*.a; do
-            case "$a" in *libunwind*|*libc++*) continue ;; esac
-            ln -s "$a" "$shim/lib/"
-          done
-          # Homebrew's zstd (named by llvm-config --system-libs) statically too
-          cp "$(brew --prefix zstd)/lib/libzstd.a" "$shim/lib/"
-          cat > "$shim/bin/llvm-config" <<EOF
-          #!/bin/sh
-          for a in "\$@"; do
-            case "\$a" in
-              --libdir) echo "$shim/lib"; exit 0 ;;
-              --ldflags) echo "-L$shim/lib"; exit 0 ;;
-            esac
-          done
-          exec "$llvm/bin/llvm-config" "\$@"
-          EOF
-          chmod +x "$shim/bin/llvm-config"
-          "$shim/bin/llvm-config" --version --libdir --ldflags
-          echo "LLVM_SYS_231_PREFIX=$shim" >> "$GITHUB_ENV"
-          echo "$llvm/bin" >> "$GITHUB_PATH"
+          ./scripts/macos-llvm.sh
       # rustup is preinstalled on the hosted runners; retried, since the
       # download of the toolchain sometimes fails on a DNS error.
       - name: Rust (stable)
@@ -501,7 +466,7 @@ jobs:
           done
           printf '%s\n' "$VERSION" > release/VERSION
           (cd release && sha256sum -c ./*.sha256 && sha256sum ./*.tar.* | grep -v '\.sha256$' | sed 's| \./| |' > SHA256SUMS)
-          hosts="linux-amd64 macos-arm64 macos-amd64 windows-amd64"
+          hosts="linux-amd64 macos-arm64 windows-amd64"
           [ "$HOSTS" = linux ] && hosts="linux-amd64"
           for h in $hosts; do
             ls "release/zell-$VERSION-$h".tar.* >/dev/null 2>&1 || { echo "::error::missing zell-$VERSION-$h.tar.xz"; exit 1; }

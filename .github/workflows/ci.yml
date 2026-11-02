@@ -62,25 +62,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.only == 'macos-arm64' && '[{"arch":"arm64","os":"macos-14"}]' || '[{"arch":"arm64","os":"macos-14"},{"arch":"amd64","os":"macos-15-intel"}]') }}
+        # amd64 waits for an LLVM 23 build for x86-64 macOS (scripts/macos-llvm.sh)
+        include: [{ arch: arm64, os: macos-14 }]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: LLVM 23
         run: |
-          # LLVM 23 for the compiler (llvm-sys 231): Homebrew's llvm@23, else
-          # its llvm (checked to be 23)
-          f=llvm; brew info llvm@23 >/dev/null 2>&1 && f=llvm@23
-          brew install "$f"
-          llvm=$(brew --prefix "$f")
-          v=$("$llvm/bin/llvm-config" --version)
-          case "$v" in 23.*) ;; *) echo "::error::Homebrew $f is LLVM $v, need 23"; exit 1 ;; esac
           brew install lld zstd
-          echo "LLVM_SYS_231_PREFIX=$llvm" >> "$GITHUB_ENV"
-          # llvm-config --system-libs names -lzstd (Homebrew), which is not on
-          # the default linker path
+          ./scripts/macos-llvm.sh
+          # llvm-config --system-libs names -lzstd and friends, not all on the
+          # default linker path
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
-          echo "$llvm/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
