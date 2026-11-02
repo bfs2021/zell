@@ -6,7 +6,8 @@ import io
 import net
 
 // TechEmpower Framework Benchmarks scenarios on net.http + database.postgres:
-// /plaintext, /json, /db, /queries?queries=N, /fortunes, /updates?queries=N.
+// /plaintext, /json, /db, /queries?queries=N, /fortunes, /updates?queries=N,
+// /cached-queries?count=N (from all of world, loaded at start).
 // The same service is written in Go (../go) and C# (../dotnet).
 // Env: PORT (8080), DB_DSN, DB_POOL (pool size, 64).
 
@@ -28,6 +29,7 @@ const selectWorld = "select id, randomnumber from world where id = $1"
 const updateWorld = "update world set randomnumber = $1 where id = $2"
 
 var db *sql.DB
+var cache []World
 
 func randomId() int {
     return random.IntN(10000) + 1
@@ -42,6 +44,27 @@ func queryCount(req *http.Request) int {
         return 500
     }
     return n
+}
+
+// The count parameter of /cached-queries, clamped to 1..500.
+func cachedCount(req *http.Request) int {
+    var n = try strings.ToInt(req.QueryValue("count")) else 1
+    if n < 1 {
+        return 1
+    }
+    if n > 500 {
+        return 500
+    }
+    return n
+}
+
+async func cachedQueries(req *http.Request, res *http.Response) void! {
+    var n = cachedCount(req)
+    var ws []World = []
+    for _ in 0..n {
+        ws = append(ws, cache[randomId() - 1])
+    }
+    res.SendJSON(200, ws)
 }
 
 async func plaintext(req *http.Request, res *http.Response) void! {
@@ -109,6 +132,7 @@ async func main() void! {
     db = postgres.Open(dsn)?
     db.SetMaxOpenConns(pool)
     db.SetMaxIdleConns(pool)
+    cache = await db.Query<World>("select id, randomnumber from world order by id", [])?
 
     var r = http.NewRouter()
     r.Get("/plaintext", plaintext)
@@ -117,6 +141,7 @@ async func main() void! {
     r.Get("/queries", queries)
     r.Get("/updates", updates)
     r.Get("/fortunes", fortunes)
+    r.Get("/cached-queries", cachedQueries)
     r.Use((next) => http.Func(async func(req *http.Request, res *http.Response) void! {
         res.SetHeader("Server", "zell")
         await next.Serve(req, res)?

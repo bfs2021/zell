@@ -1,6 +1,7 @@
 // TechEmpower Framework Benchmarks scenarios on ASP.NET Core minimal APIs +
 // Npgsql (the same service as ../zell/main.zl): /plaintext, /json, /db,
-// /queries?queries=N, /fortunes, /updates?queries=N.
+// /queries?queries=N, /fortunes, /updates?queries=N, /cached-queries?count=N
+// (from all of world, loaded at start).
 // Env: PORT (8080), DB_DSN, DB_POOL (64).
 using System.Net;
 using System.Text;
@@ -21,6 +22,12 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 builder.WebHost.ConfigureKestrel(o => o.AddServerHeader = false);
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJson.Default));
 var app = builder.Build();
+
+var cache = new List<World>(10000);
+await using (var cmd = db.CreateCommand("select id, randomnumber from world order by id"))
+await using (var r = await cmd.ExecuteReaderAsync())
+    while (await r.ReadAsync()) cache.Add(new World(r.GetInt32(0), r.GetInt32(1)));
+var cached = cache.ToArray();
 
 app.Use((ctx, next) => { ctx.Response.Headers.Server = "dotnet"; return next(ctx); });
 
@@ -63,6 +70,13 @@ app.MapGet("/updates", async (HttpContext ctx) =>
         cmd.Parameters.Add(new NpgsqlParameter<int> { TypedValue = w.Id });
         await cmd.ExecuteNonQueryAsync();
     }
+    return ws;
+});
+app.MapGet("/cached-queries", (HttpContext ctx) =>
+{
+    var n = int.TryParse(ctx.Request.Query["count"], out var c) ? Math.Clamp(c, 1, 500) : 1;
+    var ws = new World[n];
+    for (var i = 0; i < n; i++) ws[i] = cached[RandomId() - 1];
     return ws;
 });
 app.MapGet("/fortunes", async () =>

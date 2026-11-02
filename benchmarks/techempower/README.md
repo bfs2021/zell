@@ -12,6 +12,7 @@ One service written three times, with the scenarios of the
 | `/queries?queries=N` | N separate queries (1..500) |
 | `/fortunes` | all rows of `fortune` + one added at run time, sorted, HTML-escaped table |
 | `/updates?queries=N` | N reads, then N single-row updates |
+| `/cached-queries?count=N` | N random rows from an in-memory copy of `world` loaded at start |
 
 - `zell/main.zl`: `net.http` + `database.postgres` (`database.sql` pool)
 - `go/main.go`: `net/http` + pgx (`pgxpool`)
@@ -36,4 +37,5 @@ benchmarks/techempower/run.sh 3       # wrk -t8 -c256, 5 s warm-up + 15 s per te
 
 `run.sh` pins the service to CPUs 0-15, PostgreSQL (systemd `CPUAffinity`)
 to 16-23 and wrk to 24-31, and prints req/s, p50, p99 and peak RSS.
-Plaintext is measured without HTTP pipelining.
+`pipelined` is `/plaintext` with 16 requests per write (`pipeline.lua`), as in
+TechEmpower's plaintext test; the plain `plaintext` row sends one at a time.

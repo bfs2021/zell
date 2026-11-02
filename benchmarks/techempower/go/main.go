@@ -1,6 +1,7 @@
 // TechEmpower Framework Benchmarks scenarios on net/http + pgx (the same
 // service as ../zell/main.zl): /plaintext, /json, /db, /queries?queries=N,
-// /fortunes, /updates?queries=N. Env: PORT (8080), DB_DSN, DB_POOL (64).
+// /fortunes, /updates?queries=N, /cached-queries?count=N (from all of world,
+// loaded at start). Env: PORT (8080), DB_DSN, DB_POOL (64).
 package main
 
 import (
@@ -36,6 +37,7 @@ const selectWorld = "select id, randomnumber from world where id = $1"
 const updateWorld = "update world set randomnumber = $1 where id = $2"
 
 var db *pgxpool.Pool
+var cache []World
 
 func randomId() int32 { return int32(rand.IntN(10000) + 1) }
 
@@ -48,6 +50,21 @@ func queryCount(r *http.Request) int {
 		return 500
 	}
 	return n
+}
+
+func cachedQueries(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.URL.Query().Get("count"))
+	if err != nil || n < 1 {
+		n = 1
+	}
+	if n > 500 {
+		n = 500
+	}
+	ws := make([]World, 0, n)
+	for i := 0; i < n; i++ {
+		ws = append(ws, cache[randomId()-1])
+	}
+	sendJSON(w, ws)
 }
 
 func sendJSON(w http.ResponseWriter, v any) {
@@ -167,6 +184,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	rows, err := db.Query(context.Background(), "select id, randomnumber from world order by id")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for rows.Next() {
+		var wd World
+		if err := rows.Scan(&wd.Id, &wd.RandomNumber); err != nil {
+			log.Fatal(err)
+		}
+		cache = append(cache, wd)
+	}
+	rows.Close()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /plaintext", plaintext)
 	mux.HandleFunc("GET /json", jsonHandler)
@@ -174,6 +204,7 @@ func main() {
 	mux.HandleFunc("GET /queries", queries)
 	mux.HandleFunc("GET /updates", updates)
 	mux.HandleFunc("GET /fortunes", fortunes)
+	mux.HandleFunc("GET /cached-queries", cachedQueries)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "go")
 		mux.ServeHTTP(w, r)
