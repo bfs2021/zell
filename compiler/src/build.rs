@@ -877,6 +877,12 @@ fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str],
         // ThinLTO over the program's bitcode and the bitcode runtime
         // (`lto_enabled`); lld runs the LTO backend itself.
         cmd.arg("-flto=thin").arg("-fuse-ld=lld").arg("-O2");
+        // lld's LTO backend generates the program's code, and its functions
+        // carry no target-cpu: give it the CPU of a non-LTO build (the
+        // host's, or ZELL_TARGET_CPU), not generic x86-64 (no AVX, no FMA:
+        // nbody 6% and slices.BinarySearch 20% slower).
+        let cpu = std::env::var("ZELL_TARGET_CPU").ok().filter(|c| !c.is_empty()).unwrap_or_else(|| "native".to_string());
+        cmd.arg(if cfg!(target_arch = "aarch64") { format!("-mcpu={cpu}") } else { format!("-march={cpu}") });
     } else if use_lld() {
         // Opt-in: lld links faster and lays out smaller executables (no
         // page padding between segments: hello 10 KB instead of 15 KB), but
