@@ -11,8 +11,9 @@
 # that directory and turns absolute library paths in --system-libs (from the
 # release build machine) into -l<name>.
 #
-# Writes LLVM_SYS_231_PREFIX to $GITHUB_ENV and the LLVM bin directory to
-# $GITHUB_PATH when they are set, and prints both.
+# Writes LLVM_SYS_231_PREFIX and SDKROOT to $GITHUB_ENV when it is set, and
+# prints them. The LLVM bin directory is not put on PATH: its clang has no
+# default SDK, and the runtime builds with Apple's clang.
 #   scripts/macos-llvm.sh [version]
 set -e
 v=${1:-23.1.4}
@@ -52,7 +53,10 @@ exec "$llvm/bin/llvm-config" "\$@"
 EOF
 chmod +x "$shim/bin/llvm-config"
 "$shim/bin/llvm-config" --version --libdir --system-libs
-if [ -n "${GITHUB_ENV:-}" ]; then echo "LLVM_SYS_231_PREFIX=$shim" >> "$GITHUB_ENV"; fi
-if [ -n "${GITHUB_PATH:-}" ]; then echo "$llvm/bin" >> "$GITHUB_PATH"; fi
+sdk=$(xcrun --show-sdk-path)
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "LLVM_SYS_231_PREFIX=$shim" >> "$GITHUB_ENV"
+    echo "SDKROOT=$sdk" >> "$GITHUB_ENV"
+fi
 echo "LLVM_SYS_231_PREFIX=$shim"
-echo "LLVM bin: $llvm/bin"
+echo "SDKROOT=$sdk"
