@@ -2,14 +2,17 @@
  * (RFC 9106, version 0x13), the memory-hard function behind
  * crypto.kdf.Argon2id and crypto.password (runtime/ABI.md 23).
  *
- * Lanes are filled one after another on the calling thread (the result
- * does not depend on the degree of parallelism actually used, only on the
- * `threads` parameter p). Argon2i and the first half of the first pass of
+ * The lanes of a slice are independent (a block refers to other lanes only
+ * in finished slices), so each slice is filled by up to min(p, usable CPUs)
+ * threads, the calling thread included, which then wait for each other;
+ * the result depends only on the `threads` parameter p, not on how many
+ * threads ran. Argon2i and the first half of the first pass of
  * Argon2id use data-independent addressing; Argon2d and the rest of
  * Argon2id index memory by secret-dependent data, as the algorithm
  * specifies. */
 #include "rt_internal.h"
 #include "crypto/crypto.h"
+#include "platform/platform.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +157,7 @@ typedef struct {
     uint64_t v[128];
 } blk;
 
+#if !(defined(__x86_64__) && defined(__SSE2__))
 static inline uint64_t fBlaMka(uint64_t x, uint64_t y) {
     uint64_t m = 0xFFFFFFFFULL;
     return x + y + 2 * ((x & m) * (y & m));
@@ -172,9 +176,81 @@ static inline uint64_t fBlaMka(uint64_t x, uint64_t y) {
         GB(v0, v4, v8, v12); GB(v1, v5, v9, v13); GB(v2, v6, v10, v14); GB(v3, v7, v11, v15); \
         GB(v0, v5, v10, v15); GB(v1, v6, v11, v12); GB(v2, v7, v8, v13); GB(v3, v4, v9, v14); \
     } while (0)
+#endif
+
+#if defined(__x86_64__) && defined(__SSE2__)
+#include <emmintrin.h>
+
+/* SSE2 version: the block as 64 registers of two words. A row (16 words)
+ * or a column (words 2i, 2i + 1 of every row) is the 4x4 matrix of the
+ * BLAKE2b round in eight registers A0 A1 B0 B1 C0 C1 D0 D1 (two words
+ * each), so one register op runs two G functions. */
+static inline __m128i blamka_sse(__m128i x, __m128i y) {
+    __m128i z = _mm_mul_epu32(x, y);   /* lo32(x) * lo32(y) per word */
+    return _mm_add_epi64(_mm_add_epi64(x, y), _mm_add_epi64(z, z));
+}
+#define ROTR32(x) _mm_shuffle_epi32((x), _MM_SHUFFLE(2, 3, 0, 1))
+#define ROTR24(x) _mm_or_si128(_mm_srli_epi64((x), 24), _mm_slli_epi64((x), 40))
+#define ROTR16(x) _mm_or_si128(_mm_srli_epi64((x), 16), _mm_slli_epi64((x), 48))
+#define ROTR63(x) _mm_xor_si128(_mm_srli_epi64((x), 63), _mm_add_epi64((x), (x)))
+#define G_SSE(a, b, c, d)                                          \
+    do {                                                           \
+        a = blamka_sse(a, b); d = ROTR32(_mm_xor_si128(d, a));     \
+        c = blamka_sse(c, d); b = ROTR24(_mm_xor_si128(b, c));     \
+        a = blamka_sse(a, b); d = ROTR16(_mm_xor_si128(d, a));     \
+        c = blamka_sse(c, d); b = ROTR63(_mm_xor_si128(b, c));     \
+    } while (0)
+/* (hi(a), lo(b)) */
+#define HILO(a, b) _mm_castpd_si128(_mm_shuffle_pd(_mm_castsi128_pd(a), _mm_castsi128_pd(b), 1))
+
+static inline __attribute__((always_inline)) void round_sse(__m128i *A0, __m128i *A1, __m128i *B0, __m128i *B1,
+                                                             __m128i *C0, __m128i *C1, __m128i *D0, __m128i *D1) {
+    __m128i a0 = *A0, a1 = *A1, b0 = *B0, b1 = *B1, c0 = *C0, c1 = *C1, d0 = *D0, d1 = *D1;
+    /* columns: G(v0 v4 v8 v12), G(v1 v5 v9 v13) | G(v2 v6 v10 v14), G(v3 v7 v11 v15) */
+    G_SSE(a0, b0, c0, d0);
+    G_SSE(a1, b1, c1, d1);
+    /* diagonals: B (v5 v6)(v7 v4), C (v10 v11)(v8 v9), D (v15 v12)(v13 v14) */
+    __m128i tb0 = HILO(b0, b1), tb1 = HILO(b1, b0);
+    __m128i td0 = HILO(d1, d0), td1 = HILO(d0, d1);
+    G_SSE(a0, tb0, c1, td0);
+    G_SSE(a1, tb1, c0, td1);
+    /* back */
+    b0 = HILO(tb1, tb0);
+    b1 = HILO(tb0, tb1);
+    d0 = HILO(td0, td1);
+    d1 = HILO(td1, td0);
+    *A0 = a0; *A1 = a1; *B0 = b0; *B1 = b1; *C0 = c0; *C1 = c1; *D0 = d0; *D1 = d1;
+}
 
 /* next = G(prev, ref) (xor next when with_xor). */
 static void fill_block(const blk *prev, const blk *ref, blk *next, int with_xor) {
+    __m128i R[64], Z[64];
+    const __m128i *p = (const __m128i *)prev->v, *r = (const __m128i *)ref->v;
+    for (int i = 0; i < 64; i++) {
+        R[i] = _mm_xor_si128(_mm_loadu_si128(p + i), _mm_loadu_si128(r + i));
+        Z[i] = R[i];
+    }
+    for (int j = 0; j < 8; j++) {
+        __m128i *q = Z + 8 * j;
+        round_sse(&q[0], &q[1], &q[2], &q[3], &q[4], &q[5], &q[6], &q[7]);
+    }
+    for (int i = 0; i < 8; i++) {
+        __m128i *q = Z + i;
+        round_sse(&q[0], &q[8], &q[16], &q[24], &q[32], &q[40], &q[48], &q[56]);
+    }
+    __m128i *n = (__m128i *)next->v;
+    if (with_xor)
+        for (int i = 0; i < 64; i++)
+            _mm_storeu_si128(n + i, _mm_xor_si128(_mm_loadu_si128(n + i), _mm_xor_si128(Z[i], R[i])));
+    else
+        for (int i = 0; i < 64; i++) _mm_storeu_si128(n + i, _mm_xor_si128(Z[i], R[i]));
+}
+#define HAVE_FILL_BLOCK_SSE2 1
+#endif
+
+#ifndef HAVE_FILL_BLOCK_SSE2
+/* next = G(prev, ref) (xor next when with_xor): portable version. */
+static void fill_block_scalar(const blk *prev, const blk *ref, blk *next, int with_xor) {
     blk R, Z;
     for (int i = 0; i < 128; i++) R.v[i] = prev->v[i] ^ ref->v[i];
     Z = R;
@@ -192,12 +268,125 @@ static void fill_block(const blk *prev, const blk *ref, blk *next, int with_xor)
         for (int i = 0; i < 128; i++) next->v[i] = Z.v[i] ^ R.v[i];
 }
 
+static void fill_block(const blk *prev, const blk *ref, blk *next, int with_xor) {
+    fill_block_scalar(prev, ref, next, with_xor);
+}
+#endif
+
 static void blk_from_bytes(blk *b, const uint8_t *p) {
     for (int i = 0; i < 128; i++) b->v[i] = zell__ld64le(p + 8 * i);
 }
 
 static void blk_to_bytes(uint8_t *p, const blk *b) {
     for (int i = 0; i < 128; i++) zell__st64le(p + 8 * i, b->v[i]);
+}
+
+typedef struct {
+    blk *B;
+    uint32_t q, seglen, mprime, p, t;
+    int type;
+} a2ctx;
+
+/* Fills one segment (pass, slice, lane) of the memory. */
+static void fill_segment(const a2ctx *x, uint32_t pass, uint32_t slice, uint32_t lane) {
+    blk *B = x->B;
+    uint32_t q = x->q, seglen = x->seglen, p = x->p;
+    int type = x->type;
+    blk zero, input, addr;
+    memset(&zero, 0, sizeof zero);
+    int indep = type == 1 || (type == 2 && pass == 0 && slice < 2);
+    if (indep) {
+        memset(&input, 0, sizeof input);
+        input.v[0] = pass;
+        input.v[1] = lane;
+        input.v[2] = slice;
+        input.v[3] = x->mprime;
+        input.v[4] = x->t;
+        input.v[5] = (uint64_t)type;
+    }
+    uint32_t start = 0;
+    if (pass == 0 && slice == 0) {
+        start = 2;
+        if (indep) {
+            input.v[6]++;
+            fill_block(&zero, &input, &addr, 0);
+            fill_block(&zero, &addr, &addr, 0);
+        }
+    }
+    size_t cur = (size_t)lane * q + (size_t)slice * seglen + start;
+    size_t prev = (cur % q == 0) ? cur + q - 1 : cur - 1;
+    for (uint32_t i = start; i < seglen; i++, cur++, prev++) {
+        if (cur % q == 1) prev = cur - 1;
+        uint64_t rnd;
+        if (indep) {
+            if (i % 128 == 0) {
+                input.v[6]++;
+                fill_block(&zero, &input, &addr, 0);
+                fill_block(&zero, &addr, &addr, 0);
+            }
+            rnd = addr.v[i % 128];
+        } else {
+            rnd = B[prev].v[0];
+        }
+        uint64_t refLane = (rnd >> 32) % p;
+        if (pass == 0 && slice == 0) refLane = lane;
+        int same = refLane == lane;
+        uint64_t area;
+        if (pass == 0) {
+            if (slice == 0) area = i - 1;
+            else if (same) area = (uint64_t)slice * seglen + i - 1;
+            else area = (uint64_t)slice * seglen + (i == 0 ? (uint64_t)-1 : 0);
+        } else {
+            if (same) area = (uint64_t)q - seglen + i - 1;
+            else area = (uint64_t)q - seglen + (i == 0 ? (uint64_t)-1 : 0);
+        }
+        uint64_t rel = rnd & 0xFFFFFFFFULL;
+        rel = (rel * rel) >> 32;
+        rel = area - 1 - ((area * rel) >> 32);
+        uint64_t startPos = 0;
+        if (pass != 0) startPos = (slice == 3) ? 0 : (uint64_t)(slice + 1) * seglen;
+        uint64_t refIndex = (startPos + rel) % q;
+        const blk *ref = &B[refLane * q + refIndex];
+        fill_block(&B[prev], ref, &B[cur], pass != 0);
+    }
+    zell__crypto_wipe(&addr, sizeof addr);
+}
+
+#define A2_MAX_THREADS 64
+
+typedef struct {
+    const a2ctx *ctx;
+    uint32_t pass, slice, first, step;
+    bool wipe;
+} a2job;
+
+/* The lanes first, first + step, ... of one slice, or (wipe) their memory
+ * zeroed at the end. */
+static void *a2_worker(void *arg) {
+    const a2job *j = arg;
+    for (uint32_t lane = j->first; lane < j->ctx->p; lane += j->step) {
+        if (j->wipe)
+            zell__crypto_wipe(&j->ctx->B[(size_t)lane * j->ctx->q], (size_t)j->ctx->q * sizeof(blk));
+        else
+            fill_segment(j->ctx, j->pass, j->slice, lane);
+    }
+    return NULL;
+}
+
+/* Runs a2_worker over all lanes with nthreads threads (the caller's included). */
+static void a2_run(const a2ctx *ctx, uint32_t nthreads, uint32_t pass, uint32_t slice, bool wipe) {
+    a2job jobs[A2_MAX_THREADS];
+    zell__plat_thread th[A2_MAX_THREADS];
+    bool started[A2_MAX_THREADS] = { false };
+    for (uint32_t k = 0; k < nthreads; k++) {
+        jobs[k] = (a2job){ ctx, pass, slice, k, nthreads, wipe };
+        if (k > 0) started[k] = zell__plat_thread_start(&th[k], a2_worker, &jobs[k]);
+    }
+    a2_worker(&jobs[0]);
+    for (uint32_t k = 1; k < nthreads; k++) {
+        if (started[k]) zell__plat_thread_join(th[k]);
+        else a2_worker(&jobs[k]);   /* no thread: do its lanes here */
+    }
 }
 
 /* type: 0 Argon2d, 1 Argon2i, 2 Argon2id. Returns 0 ok, 1 bad parameters,
@@ -238,69 +427,13 @@ int zell__argon2(int type, const uint8_t *pw, size_t pwlen, const uint8_t *salt,
         hprime(tmp, 1024, h0, 72, NULL, 0);
         blk_from_bytes(&B[(size_t)l * q + 1], tmp);
     }
-    blk zero, input, addr;
-    memset(&zero, 0, sizeof zero);
-    for (uint32_t pass = 0; pass < t; pass++) {
-        for (uint32_t slice = 0; slice < 4; slice++) {
-            for (uint32_t lane = 0; lane < p; lane++) {
-                int indep = type == 1 || (type == 2 && pass == 0 && slice < 2);
-                if (indep) {
-                    memset(&input, 0, sizeof input);
-                    input.v[0] = pass;
-                    input.v[1] = lane;
-                    input.v[2] = slice;
-                    input.v[3] = mprime;
-                    input.v[4] = t;
-                    input.v[5] = (uint64_t)type;
-                }
-                uint32_t start = 0;
-                if (pass == 0 && slice == 0) {
-                    start = 2;
-                    if (indep) {
-                        input.v[6]++;
-                        fill_block(&zero, &input, &addr, 0);
-                        fill_block(&zero, &addr, &addr, 0);
-                    }
-                }
-                size_t cur = (size_t)lane * q + (size_t)slice * seglen + start;
-                size_t prev = (cur % q == 0) ? cur + q - 1 : cur - 1;
-                for (uint32_t i = start; i < seglen; i++, cur++, prev++) {
-                    if (cur % q == 1) prev = cur - 1;
-                    uint64_t rnd;
-                    if (indep) {
-                        if (i % 128 == 0) {
-                            input.v[6]++;
-                            fill_block(&zero, &input, &addr, 0);
-                            fill_block(&zero, &addr, &addr, 0);
-                        }
-                        rnd = addr.v[i % 128];
-                    } else {
-                        rnd = B[prev].v[0];
-                    }
-                    uint64_t refLane = (rnd >> 32) % p;
-                    if (pass == 0 && slice == 0) refLane = lane;
-                    int same = refLane == lane;
-                    uint64_t area;
-                    if (pass == 0) {
-                        if (slice == 0) area = i - 1;
-                        else if (same) area = (uint64_t)slice * seglen + i - 1;
-                        else area = (uint64_t)slice * seglen + (i == 0 ? (uint64_t)-1 : 0);
-                    } else {
-                        if (same) area = (uint64_t)q - seglen + i - 1;
-                        else area = (uint64_t)q - seglen + (i == 0 ? (uint64_t)-1 : 0);
-                    }
-                    uint64_t rel = rnd & 0xFFFFFFFFULL;
-                    rel = (rel * rel) >> 32;
-                    rel = area - 1 - ((area * rel) >> 32);
-                    uint64_t startPos = 0;
-                    if (pass != 0) startPos = (slice == 3) ? 0 : (uint64_t)(slice + 1) * seglen;
-                    uint64_t refIndex = (startPos + rel) % q;
-                    const blk *ref = &B[refLane * q + refIndex];
-                    fill_block(&B[prev], ref, &B[cur], pass != 0);
-                }
-            }
-        }
-    }
+    a2ctx ctx = { B, q, seglen, mprime, p, t, type };
+    int64_t cpus = zell__plat_cpu_limit(NULL);
+    uint32_t nthreads = p;
+    if (cpus > 0 && (uint64_t)cpus < nthreads) nthreads = (uint32_t)cpus;
+    if (nthreads > A2_MAX_THREADS) nthreads = A2_MAX_THREADS;
+    for (uint32_t pass = 0; pass < t; pass++)
+        for (uint32_t slice = 0; slice < 4; slice++) a2_run(&ctx, nthreads, pass, slice, false);
     blk c = B[q - 1];
     for (uint32_t l = 1; l < p; l++)
         for (int i = 0; i < 128; i++) c.v[i] ^= B[(size_t)l * q + q - 1].v[i];
@@ -309,7 +442,7 @@ int zell__argon2(int type, const uint8_t *pw, size_t pwlen, const uint8_t *salt,
     zell__crypto_wipe(tmp, sizeof tmp);
     zell__crypto_wipe(h0, sizeof h0);
     zell__crypto_wipe(&c, sizeof c);
-    zell__crypto_wipe(B, (size_t)mprime * sizeof(blk));
+    a2_run(&ctx, nthreads, 0, 0, true);   /* zero the memory, lanes in parallel */
     free(B);
     return 0;
 }
