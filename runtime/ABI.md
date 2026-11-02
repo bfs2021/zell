@@ -2608,9 +2608,11 @@ only holds untyped floats (`Pi`, `E`), and `2^63-1` is not representable.
 | `Abs(p) string!` | `zell_string *zell_fs_abs(const zell_string *path, zell_error **err)` | cleaned; relative paths are joined to the cwd |
 | `TempDir() string` | `zell_string *zell_fs_temp_dir(void)` | `$TMPDIR` or `/tmp` |
 
-**random** (`src/std_random.c`): xoshiro256** seeded through splitmix64,
-one process-wide state behind a mutex; seeded from `getrandom(2)` on first use
-unless `Seed` is called, after which the sequence is fixed. Not for secrets.
+**random** (`src/std_random.c`): xoshiro256** seeded through splitmix64.
+Until `Seed` is called, each thread draws from its own state, seeded from
+`getrandom(2)` on that thread's first use, without a lock. After `Seed(n)`,
+all threads draw from one process-wide state behind a mutex, and the sequence
+is fixed for `n`. Not for secrets.
 
 | Zell | C signature | Semantics / notes |
 |---|---|---|
