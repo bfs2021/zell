@@ -11,8 +11,13 @@
 # that directory and turns absolute library paths in --system-libs (from the
 # release build machine) into -l<name>.
 #
-# Writes LLVM_SYS_231_PREFIX and SDKROOT to $GITHUB_ENV when it is set, and
-# prints them. The LLVM bin directory is not put on PATH: its clang has no
+# The official static libraries hold ThinLTO bitcode of LLVM 23, which
+# Apple's ld cannot read: Rust links aarch64-apple-darwin programs with this
+# LLVM's clang and lld (CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER and
+# -fuse-ld=lld), against the SDK in SDKROOT.
+#
+# Writes LLVM_SYS_231_PREFIX, SDKROOT and the two cargo linker settings to
+# $GITHUB_ENV when it is set, and prints them. The LLVM bin directory is not put on PATH: its clang has no
 # default SDK, and the runtime builds with Apple's clang.
 #   scripts/macos-llvm.sh [version]
 set -e
@@ -57,6 +62,10 @@ sdk=$(xcrun --show-sdk-path)
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "LLVM_SYS_231_PREFIX=$shim" >> "$GITHUB_ENV"
     echo "SDKROOT=$sdk" >> "$GITHUB_ENV"
+    echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$llvm/bin/clang" >> "$GITHUB_ENV"
+    echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
 fi
+ls "$llvm/bin" | grep -E '^(ld64\.lld|lld)$'
 echo "LLVM_SYS_231_PREFIX=$shim"
 echo "SDKROOT=$sdk"
+echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$llvm/bin/clang"
