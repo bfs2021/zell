@@ -81,6 +81,7 @@ static int bn_bits(const uint64_t *a, int nl) {
 /* ---- Montgomery ---- */
 
 static void mmul(const mctx *c, uint64_t *r, const uint64_t *a, const uint64_t *b);
+static void msqr(const mctx *c, uint64_t *r, const uint64_t *a);
 
 static bool mctx_init(mctx *c, const uint64_t *m, int nl) {
     if (nl < 1 || nl > MAXL - 2 || !(m[0] & 1)) return false;
@@ -92,57 +93,115 @@ static bool mctx_init(mctx *c, const uint64_t *m, int nl) {
     c->m0 = 0 - inv;
     int mb = bn_bits(m, nl), r = 64 * nl;
     if (mb < 2) return false;
-    /* x = R mod m: start from 2^(mb-1) < m and double up to 2^r */
-    uint64_t x[MAXL] = { 0 }, t[MAXL], y[MAXL];
+    /* x = 2^(r + 64) mod m = Mont(2^64): start from 2^(mb-1) < m and double
+     * up to 2^(r+64) (about 65 doublings, as the top limb is nonzero) */
+    uint64_t x[MAXL] = { 0 }, t[MAXL];
     x[(mb - 1) / 64] = (uint64_t)1 << ((mb - 1) % 64);
-    for (int i = mb - 1; i < r + 1; i++) {
-        if (i == r) memcpy(y, x, (size_t)nl * 8);   /* keep R mod m */
+    for (int i = mb - 1; i < r + 64; i++) {
         uint64_t carry = bn_add(x, x, x, nl);
         uint64_t borrow = bn_sub(t, x, c->m, nl);
         bn_cmov(x, t, nl, 0 - (carry | (borrow ^ 1)));
     }
-    /* now y = R mod m = Mont(1) and x = 2R mod m = Mont(2); Mont(2)^r = Mont(2^r) = R^2 mod m */
+    /* Mont(2^64)^nl = Mont(2^(64 nl)) = Mont(R) = R^2 mod m: square while
+     * the exponent doubles, multiply for the set bits of nl */
     uint64_t acc[MAXL];
-    memcpy(acc, y, (size_t)nl * 8);
-    for (int b = 31 - __builtin_clz((unsigned)r); b >= 0; b--) {
-        mmul(c, acc, acc, acc);
-        if ((r >> b) & 1) mmul(c, acc, acc, x);
+    memcpy(acc, x, (size_t)nl * 8);
+    for (int b = 30 - __builtin_clz((unsigned)nl); b >= 0; b--) {
+        msqr(c, acc, acc);
+        if ((nl >> b) & 1) mmul(c, acc, acc, x);
     }
     memcpy(c->rr, acc, (size_t)nl * 8);
     return true;
 }
 
+/* Montgomery multiplication by product scanning (the "FIPS" method): the
+ * column sums of a b and of u m (u the quotient digits) accumulate in three
+ * words, so the multiplications of a column are independent instead of one
+ * carry chain through a row. */
+
+/* (c2:c1:c0) += x y */
+static inline void mac3(uint64_t *c0, uint64_t *c1, uint64_t *c2, uint64_t x, uint64_t y) {
+    u128 p = (u128)x * y;
+    u128 s = (u128)*c0 + (uint64_t)p;
+    *c0 = (uint64_t)s;
+    s = (u128)*c1 + (uint64_t)(p >> 64) + (uint64_t)(s >> 64);
+    *c1 = (uint64_t)s;
+    *c2 += (uint64_t)(s >> 64);
+}
+
 /* r = a b R^-1 mod m (a, b < m); r may alias a or b. */
 static void mmul(const mctx *c, uint64_t *r, const uint64_t *a, const uint64_t *b) {
     int nl = c->nl;
-    uint64_t t[MAXL + 2];
-    memset(t, 0, (size_t)(nl + 2) * 8);
+    const uint64_t *m = c->m;
+    uint64_t u[MAXL], out[MAXL + 1];
+    uint64_t c0 = 0, c1 = 0, c2 = 0;
     for (int i = 0; i < nl; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < nl; j++) {
-            u128 x = (u128)a[j] * b[i] + t[j] + carry;
-            t[j] = (uint64_t)x;
-            carry = (uint64_t)(x >> 64);
+        for (int j = 0; j < i; j++) {
+            mac3(&c0, &c1, &c2, a[j], b[i - j]);
+            mac3(&c0, &c1, &c2, u[j], m[i - j]);
         }
-        u128 x = (u128)t[nl] + carry;
-        t[nl] = (uint64_t)x;
-        t[nl + 1] = (uint64_t)(x >> 64);
-        uint64_t mm = t[0] * c->m0;
-        x = (u128)mm * c->m[0] + t[0];
-        carry = (uint64_t)(x >> 64);
-        for (int j = 1; j < nl; j++) {
-            x = (u128)mm * c->m[j] + t[j] + carry;
-            t[j - 1] = (uint64_t)x;
-            carry = (uint64_t)(x >> 64);
+        mac3(&c0, &c1, &c2, a[i], b[0]);
+        u[i] = c0 * c->m0;
+        mac3(&c0, &c1, &c2, u[i], m[0]);
+        c0 = c1;
+        c1 = c2;
+        c2 = 0;
+    }
+    for (int i = nl; i < 2 * nl; i++) {
+        for (int j = i - nl + 1; j < nl; j++) {
+            mac3(&c0, &c1, &c2, a[j], b[i - j]);
+            mac3(&c0, &c1, &c2, u[j], m[i - j]);
         }
-        x = (u128)t[nl] + carry;
-        t[nl - 1] = (uint64_t)x;
-        t[nl] = t[nl + 1] + (uint64_t)(x >> 64);
+        out[i - nl] = c0;
+        c0 = c1;
+        c1 = c2;
+        c2 = 0;
     }
     uint64_t d[MAXL];
-    uint64_t borrow = bn_sub(d, t, c->m, nl);
-    bn_cmov(t, d, nl, 0 - (t[nl] | (borrow ^ 1)));
-    memcpy(r, t, (size_t)nl * 8);
+    uint64_t borrow = bn_sub(d, out, m, nl);
+    bn_cmov(out, d, nl, 0 - (c0 | (borrow ^ 1)));
+    memcpy(r, out, (size_t)nl * 8);
+}
+
+/* (c2:c1:c0) += 2 (s2:s1:s0) */
+static inline void add_twice(uint64_t *c0, uint64_t *c1, uint64_t *c2, uint64_t s0, uint64_t s1, uint64_t s2) {
+    uint64_t d2 = (s2 << 1) | (s1 >> 63), d1 = (s1 << 1) | (s0 >> 63), d0 = s0 << 1;
+    u128 x = (u128)*c0 + d0;
+    *c0 = (uint64_t)x;
+    x = (u128)*c1 + d1 + (uint64_t)(x >> 64);
+    *c1 = (uint64_t)x;
+    *c2 += d2 + (uint64_t)(x >> 64);
+}
+
+/* r = a^2 R^-1 mod m (a < m); r may alias a: as mmul, with the cross
+ * products of a column summed once and doubled. */
+static void msqr(const mctx *c, uint64_t *r, const uint64_t *a) {
+    int nl = c->nl;
+    const uint64_t *m = c->m;
+    uint64_t u[MAXL], out[MAXL + 1];
+    uint64_t c0 = 0, c1 = 0, c2 = 0;
+    for (int i = 0; i < 2 * nl; i++) {
+        int lo = i < nl ? 0 : i - nl + 1;
+        uint64_t s0 = 0, s1 = 0, s2 = 0;
+        for (int j = lo; j < i - j; j++) mac3(&s0, &s1, &s2, a[j], a[i - j]);
+        add_twice(&c0, &c1, &c2, s0, s1, s2);
+        if ((i & 1) == 0 && i / 2 < nl) mac3(&c0, &c1, &c2, a[i / 2], a[i / 2]);
+        if (i < nl) {
+            for (int j = 0; j < i; j++) mac3(&c0, &c1, &c2, u[j], m[i - j]);
+            u[i] = c0 * c->m0;
+            mac3(&c0, &c1, &c2, u[i], m[0]);
+        } else {
+            for (int j = i - nl + 1; j < nl; j++) mac3(&c0, &c1, &c2, u[j], m[i - j]);
+            out[i - nl] = c0;
+        }
+        c0 = c1;
+        c1 = c2;
+        c2 = 0;
+    }
+    uint64_t d[MAXL];
+    uint64_t borrow = bn_sub(d, out, m, nl);
+    bn_cmov(out, d, nl, 0 - (c0 | (borrow ^ 1)));
+    memcpy(r, out, (size_t)nl * 8);
 }
 
 /* r = T mod m for a double-length T (2 nl limbs, T < m R). */
@@ -175,14 +234,19 @@ static void mreduce_wide(const mctx *c, uint64_t *r, const uint64_t *T) {
 static void modexp_pub(const mctx *c, uint64_t *r, const uint64_t *a, const uint64_t *e, int el) {
     int nl = c->nl;
     uint64_t am[MAXL], acc[MAXL], one[MAXL] = { 1 };
+    int top = bn_bits(e, el) - 1;
+    if (top < 0) {   /* a^0 */
+        memcpy(r, one, (size_t)nl * 8);
+        return;
+    }
+    /* the top bit of e is set: start from a itself */
     mmul(c, am, a, c->rr);
-    mmul(c, acc, one, c->rr);
-    for (int i = bn_bits(e, el) - 1; i >= 0; i--) {
-        mmul(c, acc, acc, acc);
+    memcpy(acc, am, (size_t)nl * 8);
+    for (int i = top - 1; i >= 0; i--) {
+        msqr(c, acc, acc);
         if ((e[i / 64] >> (i % 64)) & 1) mmul(c, acc, acc, am);
     }
     mmul(c, r, acc, one);
-    (void)nl;
 }
 
 /* r = a^e mod m in constant time for the el limbs of e (secret exponent). */
@@ -195,7 +259,7 @@ static void modexp_ct(const mctx *c, uint64_t *r, const uint64_t *a, const uint6
     for (int i = 2; i < 16; i++) mmul(c, tab[i], tab[i - 1], tab[1]);
     memcpy(acc, tab[0], (size_t)nl * 8);
     for (int w = el * 64 / W - 1; w >= 0; w--) {
-        for (int k = 0; k < W; k++) mmul(c, acc, acc, acc);
+        for (int k = 0; k < W; k++) msqr(c, acc, acc);
         unsigned nib = (unsigned)(e[(w * W) / 64] >> ((w * W) % 64)) & 15;
         memset(sel, 0, (size_t)nl * 8);
         for (unsigned i = 0; i < 16; i++) {
