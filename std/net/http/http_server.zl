@@ -19,6 +19,11 @@ struct route {
 
 struct routeTable {
     routes []route
+    // static path -> indexes of its routes in `routes`, in order
+    exact map[string][]int
+    // the index of the first route with a {param} or * segment
+    hasDyn   bool
+    firstDyn int
 }
 
 // The routing step at the end of a Router's middleware chain.
@@ -58,6 +63,16 @@ struct Router {
             }
         }
         var t = this.table()
+        if isStatic {
+            if t.exact == nil {
+                t.exact = map[string][]int{}
+            }
+            var key = "/" + strings.Join(parts, "/")
+            t.exact[key] = append(t.exact[key], len(t.routes))
+        } else if !t.hasDyn {
+            t.hasDyn = true
+            t.firstDyn = len(t.routes)
+        }
         t.routes = append(t.routes, route{
             method: method,
             parts: parts,
@@ -148,6 +163,21 @@ func cleanPath(p string) bool {
 
 func dispatch(t *routeTable, req *Request, res *Response) Task<void!> {
     var clean = cleanPath(req.Path)
+    // a static path by lookup, when no {param} route comes before it
+    if clean && t.exact != nil {
+        var (ids, ok) = t.exact[req.Path]
+        if ok {
+            for i in ids {
+                if t.hasDyn && i >= t.firstDyn {
+                    break
+                }
+                var m = t.routes[i].method
+                if m == req.Method || m == "*" || (m == "GET" && req.Method == "HEAD") {
+                    return t.routes[i].handler(req, res)
+                }
+            }
+        }
+    }
     var parts []string
     var split = false
     var allowed = ""
