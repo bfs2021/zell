@@ -1,0 +1,133 @@
+namespace bench.techempower
+
+import database
+import encoding
+import io
+import net
+
+// TechEmpower Framework Benchmarks scenarios on net.http + database.postgres:
+// /plaintext, /json, /db, /queries?queries=N, /fortunes, /updates?queries=N.
+// The same service is written in Go (../go) and C# (../dotnet).
+// Env: PORT (8080), DB_DSN, DB_POOL (pool size, 64).
+
+struct Message {
+    @json(name: "message") Message string
+}
+
+struct World {
+    @json(name: "id") Id int
+    @json(name: "randomNumber") @sql.column("randomnumber") RandomNumber int
+}
+
+struct Fortune {
+    Id      int
+    Message string
+}
+
+const selectWorld = "select id, randomnumber from world where id = $1"
+const updateWorld = "update world set randomnumber = $1 where id = $2"
+
+var db *sql.DB
+
+func randomId() int {
+    return random.IntN(10000) + 1
+}
+
+func queryCount(req *http.Request) int {
+    var n = try strings.ToInt(req.QueryValue("queries")) else 1
+    if n < 1 {
+        return 1
+    }
+    if n > 500 {
+        return 500
+    }
+    return n
+}
+
+async func plaintext(req *http.Request, res *http.Response) void! {
+    res.Text(200, "Hello, World!")
+}
+
+async func jsonHandler(req *http.Request, res *http.Response) void! {
+    res.SendJSON(200, Message{Message: "Hello, World!"})
+}
+
+async func single(req *http.Request, res *http.Response) void! {
+    var w = await db.QueryOne<World>(selectWorld, [randomId()])?
+    res.SendJSON(200, w)
+}
+
+async func queries(req *http.Request, res *http.Response) void! {
+    var n = queryCount(req)
+    var ws []World = []
+    for _ in 0..n {
+        ws = append(ws, await db.QueryOne<World>(selectWorld, [randomId()])?)
+    }
+    res.SendJSON(200, ws)
+}
+
+async func updates(req *http.Request, res *http.Response) void! {
+    var n = queryCount(req)
+    var ws []World = []
+    for _ in 0..n {
+        var w = await db.QueryOne<World>(selectWorld, [randomId()])?
+        w.RandomNumber = randomId()
+        ws = append(ws, w)
+    }
+    for w in ws {
+        _ = await db.Exec(updateWorld, [w.RandomNumber, w.Id])?
+    }
+    res.SendJSON(200, ws)
+}
+
+async func fortunes(req *http.Request, res *http.Response) void! {
+    var fs = await db.Query<Fortune>("select id, message from fortune", [])?
+    fs = append(fs, Fortune{Id: 0, Message: "Additional fortune added at request time."})
+    slices.SortFunc(fs, (a, b) => a.Message < b.Message)
+    var b = strings.Builder{}
+    b.WriteString("<!DOCTYPE html><html><head><title>Fortunes</title></head><body><table><tr><th>id</th><th>message</th></tr>")
+    for f in fs {
+        b.WriteString("<tr><td>")
+        b.WriteString(strconv.Itoa(f.Id))
+        b.WriteString("</td><td>")
+        b.WriteString(html.Escape(f.Message))
+        b.WriteString("</td></tr>")
+    }
+    b.WriteString("</table></body></html>")
+    res.Html(200, b.String())
+}
+
+async func main() void! {
+    var dsn = os.Getenv("DB_DSN")
+    if dsn == "" {
+        dsn = "postgres://benchmarkdbuser:benchmarkdbpass@127.0.0.1:5432/hello_world?sslmode=disable"
+    }
+    var pool = 64
+    if os.Getenv("DB_POOL") != "" {
+        pool = strings.ToInt(os.Getenv("DB_POOL"))?
+    }
+    db = postgres.Open(dsn)?
+    db.SetMaxOpenConns(pool)
+    db.SetMaxIdleConns(pool)
+
+    var r = http.NewRouter()
+    r.Get("/plaintext", plaintext)
+    r.Get("/json", jsonHandler)
+    r.Get("/db", single)
+    r.Get("/queries", queries)
+    r.Get("/updates", updates)
+    r.Get("/fortunes", fortunes)
+    r.Use((next) => http.Func(async func(req *http.Request, res *http.Response) void! {
+        res.SetHeader("Server", "zell")
+        await next.Serve(req, res)?
+    }))
+
+    var port = os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
+    var srv = http.Server{Addr: "0.0.0.0:" + port, Handler: r}
+    srv.Listen()?
+    io.Eprintln("listening on " + port)
+    await srv.Serve()?
+}
