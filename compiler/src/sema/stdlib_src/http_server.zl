@@ -803,6 +803,15 @@ async func serveConn(st *serverState, e *connEntry) {
         // 1. the head (usually already buffered after one read)
         var end = rtHeadEnd(b.buf, b.scan, b.w)
         if end < 0 {
+            // responses held for pipelined requests go out before waiting
+            // for more input
+            if c.held != "" {
+                c.setTimeout(st.writeTimeout)
+                var hn = try await c.writeString("") else -1
+                if hn < 0 {
+                    break
+                }
+            }
             c.setTimeout(st.idle)
             var ok = true
             for end < 0 {
@@ -991,7 +1000,10 @@ async func serveConn(st *serverState, e *connEntry) {
         if st.closing {
             rw.keep = false
         }
-        // 5. the response: one write for the usual case
+        // 5. the response: one write for the usual case. While the client
+        // has already sent more (pipelining), complete responses are held
+        // in c.held and leave in one write with the last of the batch:
+        // before the next read (above) or with any other write.
         c.setTimeout(st.writeTimeout)
         var status = res.Status
         if status == 0 {
@@ -1012,8 +1024,13 @@ async func serveConn(st *serverState, e *connEntry) {
                     res.Body,
                 )
             }
-            var wn = try await c.writeString(out) else -1
-            ok = wn >= 0 && rw.keep
+            if rw.keep && b.buffered() > 0 && len(c.held) + len(out) <= 65536 {
+                c.held = c.held + out
+                ok = true
+            } else {
+                var wn = try await c.writeString(out) else -1
+                ok = wn >= 0 && rw.keep
+            }
         } else {
             ok = try await finishResponse(rw, res) else false
         }
@@ -1021,6 +1038,12 @@ async func serveConn(st *serverState, e *connEntry) {
             break
         }
         e.idle = true
+    }
+    // responses still held when the loop ends abnormally; a hijacked
+    // connection sends them with its first write
+    if c.held != "" && !e.hijacked {
+        c.setTimeout(st.writeTimeout)
+        _ = try await c.writeString("") else 0
     }
     dropConn(st, e)
 }

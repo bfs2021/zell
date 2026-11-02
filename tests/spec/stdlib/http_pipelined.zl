@@ -1,0 +1,63 @@
+// test: the http server answers pipelined HTTP/1.1 requests (several in one write) in order: plain responses held for the batch, a streamed (Flush) response and a hijacked connection in the middle of a batch
+// status: passing
+// run-flags: --leak-check
+namespace spec.stdlib.http_pipelined
+
+import io
+import net
+
+async func handle(req *http.Request, res *http.Response) void! {
+    if req.Path == "/stream" {
+        res.Status = 200
+        res.Body = "one,"
+        await res.Flush()?
+        res.Body = "two"
+        return
+    }
+    if req.Path == "/raw" {
+        var rc = res.Hijack()?
+        _ = await rc.WriteString("RAW\n")?
+        rc.Close()
+        return
+    }
+    res.Text(200, req.Path)
+}
+
+struct H {
+    func Serve(req *http.Request, res *http.Response) Task<void!> {
+        return handle(req, res)
+    }
+}
+
+async func readAll(c net.Conn) string! {
+    var out = ""
+    for {
+        var s = await c.ReadString(4096)?
+        if len(s) == 0 {
+            return out
+        }
+        out += s
+    }
+}
+
+async func main() void! {
+    var srv = http.Server{Addr: "127.0.0.1:0", Handler: new H{}, NoDate: true}
+    srv.Listen()?
+    var serving = srv.Serve()
+    var c = await net.Dial(fmt.Format("127.0.0.1:{0}", srv.Port()))?
+    var get = func(p string) string { return "GET " + p + " HTTP/1.1\r\nHost: x\r\n\r\n" }
+    _ = await c.WriteString(get("/a") + get("/b") + get("/stream") + get("/c") + get("/raw"))?
+    for line in strings.Split(await readAll(c)?, "\r\n") {
+        println(line)
+    }
+    c.Close()
+
+    // a batch that ends with Connection: close
+    var d = await net.Dial(fmt.Format("127.0.0.1:{0}", srv.Port()))?
+    _ = await d.WriteString(get("/x") + get("/y") + "GET /z HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    var all = await readAll(d)?
+    println(strings.Count(all, "HTTP/1.1 200 OK"), strings.HasSuffix(all, "/z"))
+    d.Close()
+    await srv.Shutdown()
+    await serving?
+}

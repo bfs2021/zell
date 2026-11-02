@@ -214,6 +214,9 @@ struct conn {
     isTLS bool
     // TLS bytes decrypted but not yet consumed by readInto
     tpend []byte
+    // Responses held back while more pipelined requests are buffered
+    // (serveConn): the next write sends them first, then flushHeld.
+    held string
 
     // Reads into buf[off..]: bytes read, 0 at the end of the stream.
     func readInto(buf []byte, off int) Task<int!> {
@@ -231,17 +234,27 @@ struct conn {
     }
 
     func writeString(s string) Task<int!> {
-        if this.isTLS {
-            return this.tc.WriteString(s)
+        if this.held != "" {
+            return writeHeld(this, s, [])
         }
-        return this.nc.WriteString(s)
+        return this.rawWriteString(s)
     }
 
     func write(b []byte) Task<int!> {
+        if this.held != "" {
+            return writeHeld(this, "", b)
+        }
         if this.isTLS {
             return this.tc.Write(b)
         }
         return this.nc.Write(b)
+    }
+
+    func rawWriteString(s string) Task<int!> {
+        if this.isTLS {
+            return this.tc.WriteString(s)
+        }
+        return this.nc.WriteString(s)
     }
 
     // Sends n bytes of the file at path from off (sendfile(2) on plain TCP).
@@ -329,6 +342,18 @@ async func tlsReadInto(c *conn, buf []byte, off int) int! {
 }
 
 // SendFile over TLS: read the file in 64 KB pieces and write them.
+// A write behind held responses: sends them with s in one write, then b.
+// Returns the caller's byte count only.
+async func writeHeld(c *conn, s string, b []byte) int! {
+    var out = c.held + s
+    c.held = ""
+    _ = await c.rawWriteString(out)?
+    if len(b) > 0 {
+        _ = await c.write(b)?
+    }
+    return len(s) + len(b)
+}
+
 async func copyFile(c *conn, path string, off int, n int) int! {
     var f = os.Open(path)?
     var info = f.Stat()?
