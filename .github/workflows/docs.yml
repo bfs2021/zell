@@ -23,8 +23,8 @@ jobs:
       pages: ${{ steps.pages.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM 18
-        run: sudo ./scripts/setup.sh
+      - name: Install LLVM 23
+        run: sudo ./scripts/setup.sh && echo "LLVM_SYS_231_PREFIX=/usr/lib/llvm-23" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the compiler

@@ -35,8 +35,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain (LLVM 18, clang, lld)
-        run: sudo ./scripts/setup.sh
+      - name: Toolchain (LLVM 23 for the compiler, LLVM 18 for the bundle; clang, lld)
+        run: sudo ./scripts/setup.sh && echo "LLVM_SYS_231_PREFIX=/usr/lib/llvm-23" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -66,14 +66,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: LLVM 18
+      - name: LLVM 23
         run: |
-          brew install llvm@18 lld zstd
-          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> "$GITHUB_ENV"
+          # LLVM 23 for the compiler (llvm-sys 231): Homebrew's llvm@23, else
+          # its llvm (checked to be 23)
+          f=llvm; brew info llvm@23 >/dev/null 2>&1 && f=llvm@23
+          brew install "$f"
+          llvm=$(brew --prefix "$f")
+          v=$("$llvm/bin/llvm-config" --version)
+          case "$v" in 23.*) ;; *) echo "::error::Homebrew $f is LLVM $v, need 23"; exit 1 ;; esac
+          brew install lld zstd
+          echo "LLVM_SYS_231_PREFIX=$llvm" >> "$GITHUB_ENV"
           # llvm-config --system-libs names -lzstd (Homebrew), which is not on
           # the default linker path
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
-          echo "$(brew --prefix llvm@18)/bin" >> "$GITHUB_PATH"
+          echo "$llvm/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -96,7 +103,7 @@ jobs:
       - name: Compiler, examples, spec corpus
         run: |
           # Apple's lldb (Xcode 15) lacks the formatters' --recognizer-function:
-          # put Homebrew's lldb first (only lldb, so clang stays LLVM 18)
+          # put Homebrew's lldb first (only lldb; clang is LLVM 23's)
           brew install llvm >/dev/null 2>&1 || true
           for d in "$(brew --prefix llvm)/bin" "$(brew --prefix lldb 2>/dev/null)/bin"; do
             if [ -x "$d/lldb" ]; then
@@ -155,29 +162,13 @@ jobs:
           # the compiler tests look for runtime/libzell_rt.a (`make -C runtime`
           # elsewhere); here that is the Windows runtime
           cp runtime/build/x86_64-pc-windows-gnu/libzell_rt.a runtime/libzell_rt.a
-      # llvm-sys needs llvm-config and static LLVM libraries with every
-      # target the compiler initialises (X86, AArch64, WebAssembly): the
-      # official clang+llvm tarball for MSVC has both (the installer has
-      # neither). Its llvm-config lists libxml2s.lib, needed only by
-      # LLVMWindowsManifest, which nothing links: a stub library stands in.
-      # LLVM is built against the dynamic CRT (/MD), so the Rust code is too.
-      - name: LLVM 18 for the compiler (MSVC)
+      # LLVM 23 for the compiler (MSVC): the official tarball plus zlib, zstd,
+      # the SDK import libraries, a libxml2 stub and an llvm-config shim
+      # (scripts/windows/llvm.ps1). LLVM 23 uses the static CRT, so the Rust
+      # code does too (.cargo/config.toml).
+      - name: LLVM 23 for the compiler (MSVC)
         shell: pwsh
-        run: |
-          $name = "clang+llvm-18.1.8-x86_64-pc-windows-msvc"
-          $prefix = Join-Path $env:RUNNER_TEMP $name
-          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
-            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/$name.tar.xz" -OutFile "$env:RUNNER_TEMP\llvm.tar.xz"
-            tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP" "$name/bin/llvm-config.exe" "$name/bin/clang-cl.exe" "$name/bin/llvm-lib.exe" "$name/lib" "$name/include"
-            if ($LASTEXITCODE -ne 0) { throw "extracting LLVM failed" }
-            Remove-Item "$env:RUNNER_TEMP\llvm.tar.xz"
-          }
-          Set-Content -Path "$env:RUNNER_TEMP\xml2stub.c" -Value "int zell_libxml2_stub;"
-          & "$prefix\bin\clang-cl.exe" /nologo /c "$env:RUNNER_TEMP\xml2stub.c" "/Fo$env:RUNNER_TEMP\xml2stub.obj"
-          & "$prefix\bin\llvm-lib.exe" /nologo "/out:$prefix\lib\libxml2s.lib" "$env:RUNNER_TEMP\xml2stub.obj"
-          if ($LASTEXITCODE -ne 0) { throw "libxml2s.lib stub failed" }
-          & "$prefix\bin\llvm-config.exe" --version --targets-built --system-libs
-          "LLVM_SYS_180_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        run: ./scripts/windows/llvm.ps1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -197,9 +188,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain (LLVM 18, mingw-w64, Wine, aarch64 gcc + QEMU, musl)
+      - name: Toolchain (LLVM 23 and 18, mingw-w64, Wine, aarch64 gcc + QEMU, musl)
         run: |
           sudo ./scripts/setup.sh
+          echo "LLVM_SYS_231_PREFIX=/usr/lib/llvm-23" >> "$GITHUB_ENV"
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y mingw-w64 wine64 gcc-aarch64-linux-gnu qemu-user-static musl-tools

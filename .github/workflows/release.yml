@@ -138,7 +138,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.meta.outputs.ref }}
-      - name: LLVM 18
+      - name: LLVM (clang-18 and the LLVM 18 tools for the bundle)
         run: sudo ./scripts/setup.sh
       - name: Cache of the pinned downloads
         uses: actions/cache@v4
@@ -192,14 +192,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.meta.outputs.ref }}
-      - name: LLVM 18 (Linux)
+      - name: LLVM 23 (Linux)
         if: runner.os == 'Linux'
-        run: sudo ./scripts/setup.sh
-      - name: LLVM 18 (macOS)
+        run: sudo ./scripts/setup.sh && echo "LLVM_SYS_231_PREFIX=/usr/lib/llvm-23" >> "$GITHUB_ENV"
+      - name: LLVM 23 (macOS; llvm@18 only for bin/lld)
         if: runner.os == 'macOS'
         run: |
+          # LLVM 23 for the compiler (llvm-sys 231): Homebrew's llvm@23, else
+          # its llvm (checked to be 23)
+          f=llvm; brew info llvm@23 >/dev/null 2>&1 && f=llvm@23
+          brew install "$f"
+          llvm=$(brew --prefix "$f")
+          v=$("$llvm/bin/llvm-config" --version)
+          case "$v" in 23.*) ;; *) echo "::error::Homebrew $f is LLVM $v, need 23"; exit 1 ;; esac
           brew install llvm@18 lld zstd
-          llvm=$(brew --prefix llvm@18)
           # Self-contained binaries: the Rust build must see only LLVM's static
           # archives, never Homebrew's lib directory. With -L<llvm>/lib on the
           # link line, -lc++ resolves to Homebrew's libc++.dylib, which
@@ -230,7 +236,7 @@ jobs:
           EOF
           chmod +x "$shim/bin/llvm-config"
           "$shim/bin/llvm-config" --version --libdir --ldflags
-          echo "LLVM_SYS_180_PREFIX=$shim" >> "$GITHUB_ENV"
+          echo "LLVM_SYS_231_PREFIX=$shim" >> "$GITHUB_ENV"
           echo "$llvm/bin" >> "$GITHUB_PATH"
       # rustup is preinstalled on the hosted runners; retried, since the
       # download of the toolchain sometimes fails on a DNS error.
@@ -315,29 +321,13 @@ jobs:
             mingw-w64-x86_64-llvm
       - name: Runtime (MinGW ABI)
         run: make -C runtime CROSS=x86_64-w64-mingw32 -j"$(nproc)"
-      # llvm-sys needs llvm-config and static LLVM libraries with every
-      # target the compiler initialises (X86, AArch64, WebAssembly): the
-      # official clang+llvm tarball for MSVC has both (the installer has
-      # neither). Its llvm-config lists libxml2s.lib, needed only by
-      # LLVMWindowsManifest, which nothing links: a stub library stands in.
-      # LLVM is built against the dynamic CRT (/MD), so the Rust code is too.
-      - name: LLVM 18 for the compiler (MSVC)
+      # LLVM 23 for the compiler (MSVC): the official tarball plus zlib, zstd,
+      # the SDK import libraries, a libxml2 stub and an llvm-config shim
+      # (scripts/windows/llvm.ps1). LLVM 23 uses the static CRT, so the Rust
+      # code does too (.cargo/config.toml).
+      - name: LLVM 23 for the compiler (MSVC)
         shell: pwsh
-        run: |
-          $name = "clang+llvm-18.1.8-x86_64-pc-windows-msvc"
-          $prefix = Join-Path $env:RUNNER_TEMP $name
-          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
-            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/$name.tar.xz" -OutFile "$env:RUNNER_TEMP\llvm.tar.xz"
-            tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C "$env:RUNNER_TEMP" "$name/bin/llvm-config.exe" "$name/bin/clang-cl.exe" "$name/bin/llvm-lib.exe" "$name/bin/lld.exe" "$name/lib" "$name/include"
-            if ($LASTEXITCODE -ne 0) { throw "extracting LLVM failed" }
-            Remove-Item "$env:RUNNER_TEMP\llvm.tar.xz"
-          }
-          Set-Content -Path "$env:RUNNER_TEMP\xml2stub.c" -Value "int zell_libxml2_stub;"
-          & "$prefix\bin\clang-cl.exe" /nologo /c "$env:RUNNER_TEMP\xml2stub.c" "/Fo$env:RUNNER_TEMP\xml2stub.obj"
-          & "$prefix\bin\llvm-lib.exe" /nologo "/out:$prefix\lib\libxml2s.lib" "$env:RUNNER_TEMP\xml2stub.obj"
-          if ($LASTEXITCODE -ne 0) { throw "libxml2s.lib stub failed" }
-          & "$prefix\bin\llvm-config.exe" --version --targets-built --system-libs
-          "LLVM_SYS_180_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        run: ./scripts/windows/llvm.ps1
       - name: Rust (stable, MSVC)
         shell: pwsh
         run: |
@@ -367,10 +357,11 @@ jobs:
         with:
           name: targets-macos
           path: build/targets
-      # bin/lld.exe: the official LLVM 18.1.8 lld (same /MD runtime as zell.exe;
-      # package-toolchain.sh copies the Visual C++ DLLs next to both)
+      # bin/lld.exe: the prebuilt toolchain-inputs asset, else the official
+      # LLVM lld.exe of the tarball (package-toolchain.sh copies the Visual
+      # C++ DLLs it may need next to it)
       - name: bin/lld
-        run: LLD_BINARY="$(cygpath -u "$RUNNER_TEMP")/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin/lld.exe" ./scripts/build-lld.sh --prebuilt
+        run: LLD_BINARY="$(cygpath -u "$ZELL_WIN_LLVM")/bin/lld.exe" ./scripts/build-lld.sh --prebuilt
       - name: Package
         run: ./scripts/package-toolchain.sh --no-build --out dist --version "${{ needs.meta.outputs.version }}" && ls -l dist
       - uses: actions/upload-artifact@v4

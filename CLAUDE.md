@@ -2,7 +2,7 @@
 
 Zell is a compiled language (Go-like simplicity, C#-style namespaces and
 `var` inference, methods inside structs, `T!` errors with `?`/`try`,
-`async`/`await`, no GC) implemented as a Rust compiler on LLVM 18 with a C
+`async`/`await`, no GC) implemented as a Rust compiler on LLVM 23 with a C
 runtime. Read `DESIGN.md` before touching anything: it is the language spec
 and every change must match it or update it.
 
@@ -25,7 +25,7 @@ and every change must match it or update it.
 ## Build and test
 
 ```sh
-./scripts/setup.sh                 # once: llvm-18-dev, clang, lld (Ubuntu)
+./scripts/setup.sh                 # once: LLVM 23 (apt.llvm.org) + LLVM 18 for the bundle, clang, lld (Ubuntu)
 make -C runtime && make -C runtime test     # C runtime (-Werror), `make asan` for sanitizers
 SCALE=small scripts/tsan-run.sh benchmarks/channel_pingpong/main.zl  # Zell program + runtime under TSan (docs/TOOLING.md)
 make -C runtime CROSS=x86_64-w64-mingw32 test-wine  # Windows runtime (mingw-w64, -Werror) + C tests under wine

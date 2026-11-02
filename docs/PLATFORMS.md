@@ -480,7 +480,7 @@ macOS нужно снять карантин: `xattr -dr com.apple.quarantine
 - CI (`.github/workflows/ci.yml`): Linux amd64/arm64 (нативно, артефакт
   тулчейна), macOS arm64/amd64 (`cargo test`, `scripts/macos-verify.sh
   --quick`, артефакт), Windows (MSYS2 MINGW64: рантайм и C-тесты нативно с
-  IOCP и с WSAPoll, компилятор с LLVM 18), кросс-джоб на Linux (Windows +
+  IOCP и с WSAPoll, компилятор с LLVM 23), кросс-джоб на Linux (Windows +
   Wine, linux-arm64 + QEMU, musl, стаб-check macOS, `cross.rs` целиком,
   размеры, архивы рантаймов). Здесь он не запускался.
 

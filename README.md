@@ -19,7 +19,7 @@ what Go makes you write by hand:
 - a large standard library written mostly in Zell (HTTP/1.1 and 2, TLS
   1.3, SQL with PostgreSQL and SQLite drivers, JSON/YAML/TOML/XML, regex,
   crypto, compression, structured logging, metrics and tracing, an ORM),
-  compiled through LLVM 18 to native code.
+  compiled through LLVM 23 to native code.
 
 ```zell
 namespace hello
@@ -193,12 +193,12 @@ pool) are described in [docs/EXAMPLES.md](docs/EXAMPLES.md).
 ### From source
 
 Building from source works on Linux x86-64 or arm64, macOS and (through MSYS2) Windows. You
-need Rust, LLVM 18, clang and lld (a checkout links with the system clang;
+need Rust, LLVM 23, clang and lld (a checkout links with the system clang;
 the bundled lld and link inputs come from `scripts/bundle-targets.sh`):
 
 ```sh
 git clone https://github.com/zell-lang/zell && cd zell
-./scripts/setup.sh                    # Ubuntu 24.04: llvm-18-dev, clang-18, lld-18 (run as root)
+./scripts/setup.sh                    # Ubuntu 24.04: LLVM 23 from apt.llvm.org (+ LLVM 18 for the bundle scripts; run as root)
 make -C runtime                       # the C runtime (libzell_rt.a)
 cargo build --release                 # target/release/zell, zell-lsp and zell-mcp
 export PATH="$PWD/target/release:$PATH"
@@ -392,7 +392,7 @@ into a project.
 
 | Path | What |
 |---|---|
-| `compiler/` | the `zell` compiler (Rust, inkwell/LLVM 18): lexer, parser, semantic analysis, codegen, build, packages, `doc`, `fmt`, `test` |
+| `compiler/` | the `zell` compiler (Rust, inkwell/LLVM 23): lexer, parser, semantic analysis, codegen, build, packages, `doc`, `fmt`, `test` |
 | `runtime/` | the C runtime: allocator, refcounting, strings, slices, maps, scheduler, I/O, the C parts of the stdlib (`runtime/ABI.md`) |
 | `std/` | the standard library sources (written by `compiler/build.rs` from `compiler/src/sema/stdlib_src/`), plus its tests and examples (`*_test.zl`) |
 | `lsp/`, `editors/vscode/`, `grammar/` | language server, VS Code extension, Grammar-Kit grammar |

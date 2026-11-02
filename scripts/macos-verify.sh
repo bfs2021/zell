@@ -4,8 +4,8 @@
 # (runtime against stub headers, Zell code as Mach-O objects); this script
 # builds, links and runs it for real and prints one line per check.
 #
-# Needs: Xcode command line tools (clang, the SDK), Rust (cargo), LLVM 18
-# (brew install llvm@18; LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)).
+# Needs: Xcode command line tools (clang, the SDK), Rust (cargo), LLVM 23
+# (brew install llvm; LLVM_SYS_231_PREFIX=$(brew --prefix llvm)).
 # Usage: scripts/macos-verify.sh [--quick]   (--quick: skip cargo test)
 # Exit status: the number of failed checks (0 = the port works).
 set -u
@@ -25,7 +25,7 @@ check() { # name command...
     fi
 }
 [ "$(uname -s)" = Darwin ] || { echo "macos-verify.sh: run this on macOS" >&2; exit 100; }
-export LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-$(brew --prefix llvm@18 2>/dev/null || true)}
+export LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-$(brew --prefix llvm@23 2>/dev/null || brew --prefix llvm 2>/dev/null || true)}
 export SDKROOT=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
 echo "macOS $(sw_vers -productVersion) $(uname -m), SDK $SDKROOT"
 
