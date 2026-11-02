@@ -260,6 +260,18 @@ fn lto_enabled(opts: &BuildOptions) -> bool {
     !tsan_enabled() && opts.release && !cfg!(target_os = "windows") && std::env::var("ZELL_LTO").is_ok_and(|v| v == "1")
 }
 
+/// The ThinLTO cache (`$ZELL_CACHE_DIR`/lto, else `$XDG_CACHE_HOME`/zell/lto,
+/// else ~/.cache/zell/lto); lld prunes it by age and size itself.
+fn lto_cache_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("ZELL_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CACHE_HOME").map(|d| PathBuf::from(d).join("zell")))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("zell")))?;
+    let dir = base.join("lto");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// The bitcode runtime archive beside the native one `rt`
 /// (`runtime/libzell_rt.a` -> `runtime/build/lto/libzell_rt.a`, or
 /// `<dir>/lto/libzell_rt.a` for an installed `<dir>/libzell_rt.a`).
@@ -617,7 +629,7 @@ fn emit_plain(program: &Program, name: &str, output: PathBuf, opts: &BuildOption
     let module = lower(program, &ctx, name, &output, opts)?;
     let machine = codegen::host_machine(opt_level(opts.opt))?;
     set_sections(&module);
-    optimise(&module, &machine, opts.opt)?;
+    optimise(&module, &machine, opts.opt, opts.emit == Emit::Exe && lto_enabled(opts))?;
     match opts.emit {
         Emit::LlvmIr => {
             module.print_to_file(&output).map_err(|e| format!("cannot write {}: {}", output.display(), e.to_string()))?;
@@ -738,13 +750,16 @@ fn keep_frame_pointers(ctx: &Context, module: &Module) {
     }
 }
 
-fn optimise(module: &Module, machine: &TargetMachine, opt: u8) -> Result<(), String> {
+/// `lto`: the module goes to a ThinLTO link, which optimises it again
+/// after importing across modules: the pre-link pipeline leaves out what
+/// that run redoes (at -O1 and above).
+fn optimise(module: &Module, machine: &TargetMachine, opt: u8, lto: bool) -> Result<(), String> {
     let _t = phase("optimise");
     // Code generation emits every stdlib function a program could reach
     // (over 1000 for hello); drop the unreferenced ones first, so neither
     // the optimisation pipeline nor the code generator sees them.
     module.run_passes("globaldce", machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: globaldce failed: {}", e.to_string()))?;
-    let pipeline = format!("default<O{}>", opt.min(3));
+    let pipeline = if lto && opt > 0 { format!("thinlto-pre-link<O{}>", opt.min(3)) } else { format!("default<O{}>", opt.min(3)) };
     module.run_passes(&pipeline, machine, PassBuilderOptions::create()).map_err(|e| format!("internal compiler error: optimisation failed: {}", e.to_string()))?;
     codegen::dedup_declares(module);
     codegen::coro_frame_fixup(module);
@@ -883,6 +898,12 @@ fn host_clang_command(objs: &[PathBuf], rt: &Path, output: &Path, libs: &[&str],
         // nbody 6% and slices.BinarySearch 20% slower).
         let cpu = std::env::var("ZELL_TARGET_CPU").ok().filter(|c| !c.is_empty()).unwrap_or_else(|| "native".to_string());
         cmd.arg(if cfg!(target_arch = "aarch64") { format!("-mcpu={cpu}") } else { format!("-march={cpu}") });
+        // The ThinLTO cache: modules whose inputs did not change (the
+        // bitcode runtime, unchanged parts of the program) come back from
+        // it instead of being optimised and compiled again.
+        if let Some(dir) = lto_cache_dir() {
+            cmd.arg(format!("-Wl,--thinlto-cache-dir={}", dir.display()));
+        }
     } else if use_lld() {
         // Opt-in: lld links faster and lays out smaller executables (no
         // page padding between segments: hello 10 KB instead of 15 KB), but
@@ -925,7 +946,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
     if opts.emit != Emit::Exe {
         // Whole-program artefacts are not split.
         set_sections(&module);
-        optimise(&module, &machine, opts.opt)?;
+        optimise(&module, &machine, opts.opt, false)?;
         if opts.emit == Emit::LlvmIr {
             module.print_to_file(&output).map_err(|e| format!("cannot write {}: {}", output.display(), e.to_string()))?;
         } else {
@@ -953,7 +974,7 @@ fn build_package(project: &Project, target: PkgId, opts: &BuildOptions) -> Resul
             log(opts, format!("cache hit: {name} ({})", obj.display()));
         } else {
             log(opts, format!("compiling {name} -> {}", obj.display()));
-            optimise(&part, &machine, opts.opt)?;
+            optimise(&part, &machine, opts.opt, false)?;
             if crate::lines::supported(&crate::target::current()) {
                 crate::lines::expose(&part, Some(name));
             }
