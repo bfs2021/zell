@@ -254,7 +254,7 @@ pub const DOCS: &[(&str, &str, &str)] = &[
     ("runtime.Workers", "", "Workers returns the number of worker threads of the task scheduler (starting it): ZELL_WORKERS, else the CPUs the process may use (runtime.CPULimit)."),
     ("runtime.CPULimit", "", "CPULimit returns the CPUs the process may use: the online CPUs capped by the affinity mask and by a container's CPU quota, rounded up (cgroup cpu.max, a Windows job object's CPU rate)."),
     ("runtime.MemLimit", "", "MemLimit returns the memory limit in bytes, 0 for none: ZELL_MEMLIMIT, else the container's (cgroup memory.max or memory.high, a Windows job object's memory limit). Near it the heap keeps no free memory in reserve."),
-    ("runtime.SetMemLimit", "n int", "SetMemLimit sets the memory limit to n bytes (0: none) and returns the previous one; free memory over the new target goes back to the OS at once."),
+    ("runtime.SetMemLimit", "n", "SetMemLimit sets the memory limit to n bytes (0: none) and returns the previous one; free memory over the new target goes back to the OS at once."),
     ("runtime.FreeOSMemory", "", "FreeOSMemory returns as much free heap memory to the operating system as possible: the calling thread's empty pages, the free page reserve and cached large mappings (runtime/ABI.md 3.2)."),
     // thread
     ("thread.Spawn", "f", "Spawn starts f on a new OS thread outside the task scheduler and returns a handle for Join."),

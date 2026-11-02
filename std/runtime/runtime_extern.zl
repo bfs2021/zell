@@ -7,6 +7,26 @@ namespace runtime
 // C: zell_runtime_free_os_memory (runtime/src/std_*.c).
 extern func FreeOSMemory()
 
+// Workers returns the number of worker threads of the task scheduler (starting it): ZELL_WORKERS, else the CPUs the process may use (runtime.CPULimit).
+//
+// C: zell_runtime_workers (runtime/src/std_*.c).
+extern func Workers() int
+
+// CPULimit returns the CPUs the process may use: the online CPUs capped by the affinity mask and by a container's CPU quota, rounded up (cgroup cpu.max, a Windows job object's CPU rate).
+//
+// C: zell_runtime_cpu_limit (runtime/src/std_*.c).
+extern func CPULimit() int
+
+// MemLimit returns the memory limit in bytes, 0 for none: ZELL_MEMLIMIT, else the container's (cgroup memory.max or memory.high, a Windows job object's memory limit). Near it the heap keeps no free memory in reserve.
+//
+// C: zell_runtime_mem_limit (runtime/src/std_*.c).
+extern func MemLimit() int
+
+// SetMemLimit sets the memory limit to n bytes (0: none) and returns the previous one; free memory over the new target goes back to the OS at once.
+//
+// C: zell_runtime_set_mem_limit (runtime/src/std_*.c).
+extern func SetMemLimit(n int) int
+
 // Internal runtime primitive (used by the Zell sources of this namespace).
 // C: zell_runtime_rt_collect_cycles (runtime/src/std_*.c).
 extern func rtCollectCycles() int
