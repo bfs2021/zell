@@ -37,6 +37,22 @@ CLANG   ?= $(shell command -v clang-23 >/dev/null 2>&1 && echo clang-23 || echo 
 SYSROOT ?=
 STUBSDK ?=
 HAVE_CLANG := $(shell command -v $(CLANG) >/dev/null 2>&1 && echo yes)
+# Native Windows host (MSYS2, Git Bash, Cygwin): recipes see MSYS' POSIX-style temp
+# paths (/tmp) or none, which the native compilers cannot use ("unable to make
+# temporary file"), so export a Windows-style one (cygpath -m: forward slashes, a
+# path every native tool accepts). Non-Windows hosts are untouched.
+ifeq ($(findstring NT,$(shell uname -s)),NT)
+WIN_TEMP := $(shell cygpath -m "$${TEMP:-/tmp}" 2>/dev/null)
+ifeq ($(WIN_TEMP),)
+WIN_TEMP := $(TEMP)
+endif
+ifeq ($(WIN_TEMP),)
+WIN_TEMP := C:/Windows/Temp
+endif
+export TEMP := $(WIN_TEMP)
+export TMP := $(WIN_TEMP)
+export TMPDIR := $(WIN_TEMP)
+endif
 
 ifneq ($(CROSS),)
 # Cross build. clang is preferred: one compiler for every target, and the
@@ -208,7 +224,9 @@ WINE ?= wine
 WINE_TESTS := $(patsubst tests/%.c,%,$(wildcard tests/test_*.c))
 test-wine: $(LIB) | $(BUILD)/tests
 	@if [ -z "$(CROSS)" ]; then echo "test-wine needs CROSS=x86_64-w64-mingw32"; exit 2; fi
-	@WINEDEBUG=-all $(WINE) cmd /c "if not exist %TEMP% mkdir %TEMP%" >/dev/null 2>&1 || true  # fresh prefixes lack it; wine needs a UTF-8 locale for non-ASCII file names (LC_ALL below)
+ifneq ($(WINE),)
+	@WINEDEBUG=-all $(WINE) cmd /c "if not exist %TEMP% mkdir %TEMP%" >/dev/null 2>&1 || true  # fresh wine prefixes lack it; with WINE= on a native Windows host this would run cmd.exe interactively (MSYS turns /c into C:/) and hang
+endif
 	@pass=""; fail=""; nobuild=""; for t in $(WINE_TESTS); do \
 	  if ! $(CC) $(CFLAGS) -static tests/$$t.c -o $(BUILD)/tests/$$t.exe $(LIB) $(LDLIBS) -lpthread > $(BUILD)/tests/$$t.build.log 2>&1; then \
 	    nobuild="$$nobuild $$t"; echo "== $$t: does not build for Windows (see $(BUILD)/tests/$$t.build.log)"; continue; fi; \
